@@ -115,6 +115,11 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 	}
 
 	// Priority 7: Default agent
+	if peer != nil && peer.Kind == "direct" && channel != "cli" && channel != "system" {
+		// Automatic registration for direct messages from real channels
+		return choose("user-"+channel+"-"+peer.ID, "auto.register")
+	}
+
 	return choose(r.resolveDefaultAgentID(), "default")
 }
 
@@ -141,7 +146,7 @@ func matchesAccountID(matchAccountID, actual string) bool {
 	if trimmed == "*" {
 		return true
 	}
-	return strings.ToLower(trimmed) == strings.ToLower(actual)
+	return strings.EqualFold(trimmed, actual)
 }
 
 func (r *RouteResolver) findPeerMatch(bindings []config.AgentBinding, peer *RoutePeer) *config.AgentBinding {
@@ -155,7 +160,7 @@ func (r *RouteResolver) findPeerMatch(bindings []config.AgentBinding, peer *Rout
 		if peerKind == "" || peerID == "" {
 			continue
 		}
-		if peerKind == strings.ToLower(peer.Kind) && peerID == peer.ID {
+		if strings.EqualFold(peerKind, peer.Kind) && peerID == peer.ID {
 			return b
 		}
 	}
@@ -229,6 +234,12 @@ func (r *RouteResolver) pickAgentID(agentID string) string {
 			return normalized
 		}
 	}
+
+	// Allow dynamic user agents
+	if strings.HasPrefix(normalized, "user-") {
+		return normalized
+	}
+
 	return NormalizeAgentID(r.resolveDefaultAgentID())
 }
 

@@ -1,12 +1,18 @@
 package agent
 
 import (
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // AgentRegistry manages multiple agent instances and routes messages to them.
@@ -14,16 +20,23 @@ type AgentRegistry struct {
 	agents   map[string]*AgentInstance
 	resolver *routing.RouteResolver
 	mu       sync.RWMutex
+	cfg      *config.Config
+	bus      *bus.MessageBus
+	provider providers.LLMProvider
 }
 
 // NewAgentRegistry creates a registry from config, instantiating all agents.
 func NewAgentRegistry(
 	cfg *config.Config,
+	bus *bus.MessageBus,
 	provider providers.LLMProvider,
 ) *AgentRegistry {
 	registry := &AgentRegistry{
 		agents:   make(map[string]*AgentInstance),
 		resolver: routing.NewRouteResolver(cfg),
+		cfg:      cfg,
+		bus:      bus,
+		provider: provider,
 	}
 
 	agentConfigs := cfg.Agents.List
@@ -33,6 +46,7 @@ func NewAgentRegistry(
 			Default: true,
 		}
 		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider)
+		registry.registerToolsToAgent(instance)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
@@ -40,6 +54,7 @@ func NewAgentRegistry(
 			ac := &agentConfigs[i]
 			id := routing.NormalizeAgentID(ac.ID)
 			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider)
+			registry.registerToolsToAgent(instance)
 			registry.agents[id] = instance
 			logger.InfoCF("agent", "Registered agent",
 				map[string]interface{}{
@@ -55,12 +70,189 @@ func NewAgentRegistry(
 }
 
 // GetAgent returns the agent instance for a given ID.
+// If the agent doesn't exist but has a "user-" prefix, it is automatically registered.
 func (r *AgentRegistry) GetAgent(agentID string) (*AgentInstance, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	id := routing.NormalizeAgentID(agentID)
 	agent, ok := r.agents[id]
-	return agent, ok
+	r.mu.RUnlock()
+	if ok {
+		return agent, true
+	}
+
+	// Support dynamic registration for "user-" agents
+	if strings.HasPrefix(id, "user-") {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// Double check after lock
+		if agent, ok := r.agents[id]; ok {
+			return agent, true
+		}
+
+		// Implement dynamic registration
+		logger.InfoCF("agent", "Auto-registering new user agent", map[string]interface{}{
+			"agent_id": id,
+		})
+
+		// Create virtual config
+		// Use a dedicated workspace folder for dynamic tenants to ensure isolation
+		workspace := filepath.Join("~", ".picoclaw", "tenants", id)
+
+		ac := &config.AgentConfig{
+			ID:        id,
+			Name:      id,
+			Workspace: workspace,
+		}
+
+		instance := NewAgentInstance(ac, &r.cfg.Agents.Defaults, r.cfg, r.provider)
+
+		// Initialize tenant workspace with templates and skills from default workspace
+		r.initializeTenantWorkspace(instance.Workspace)
+
+		r.registerToolsToAgent(instance)
+		r.agents[id] = instance
+
+		logger.InfoCF("agent", "Registered dynamic agent",
+			map[string]interface{}{
+				"agent_id":  id,
+				"workspace": instance.Workspace,
+				"model":     instance.Model,
+			})
+
+		return instance, true
+	}
+
+	return nil, false
+}
+
+// registerToolsToAgent registers tools that are shared across all agents.
+func (r *AgentRegistry) registerToolsToAgent(agent *AgentInstance) {
+	// Web tools
+	if searchTool := tools.NewWebSearchTool(tools.WebSearchToolOptions{
+		BraveAPIKey:          r.cfg.Tools.Web.Brave.APIKey,
+		BraveMaxResults:      r.cfg.Tools.Web.Brave.MaxResults,
+		BraveEnabled:         r.cfg.Tools.Web.Brave.Enabled,
+		DuckDuckGoMaxResults: r.cfg.Tools.Web.DuckDuckGo.MaxResults,
+		DuckDuckGoEnabled:    r.cfg.Tools.Web.DuckDuckGo.Enabled,
+		PerplexityAPIKey:     r.cfg.Tools.Web.Perplexity.APIKey,
+		PerplexityMaxResults: r.cfg.Tools.Web.Perplexity.MaxResults,
+		PerplexityEnabled:    r.cfg.Tools.Web.Perplexity.Enabled,
+	}); searchTool != nil {
+		agent.Tools.Register(searchTool)
+	}
+	agent.Tools.Register(tools.NewWebFetchTool(50000))
+
+	// Hardware tools (I2C, SPI)
+	agent.Tools.Register(tools.NewI2CTool())
+	agent.Tools.Register(tools.NewSPITool())
+
+	// Message tool
+	messageTool := tools.NewMessageTool()
+	messageTool.SetSendCallback(func(channel, chatID, content string) error {
+		r.bus.PublishOutbound(bus.OutboundMessage{
+			Channel: channel,
+			ChatID:  chatID,
+			Content: content,
+		})
+		return nil
+	})
+	agent.Tools.Register(messageTool)
+
+	// Spawn tool with allowlist checker
+	subagentManager := tools.NewSubagentManager(r.provider, agent.Model, agent.Workspace, r.bus)
+	spawnTool := tools.NewSpawnTool(subagentManager)
+	currentAgentID := agent.ID
+	spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
+		return r.CanSpawnSubagent(currentAgentID, targetAgentID)
+	})
+	agent.Tools.Register(spawnTool)
+
+	// Update context builder with the complete tools registry
+	agent.ContextBuilder.SetToolsRegistry(agent.Tools)
+}
+
+// initializeTenantWorkspace copies bootstrap files and skills from the default workspace to the new tenant workspace.
+func (r *AgentRegistry) initializeTenantWorkspace(target string) {
+	source := expandHome(r.cfg.Agents.Defaults.Workspace)
+	if source == "" || source == target {
+		return
+	}
+
+	logger.InfoCF("agent", "Initializing tenant workspace from template", map[string]interface{}{
+		"source": source,
+		"target": target,
+	})
+
+	// 1. Copy bootstrap files
+	bootstrapFiles := []string{"SOUL.md", "USER.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"}
+	for _, f := range bootstrapFiles {
+		srcPath := filepath.Join(source, f)
+		dstPath := filepath.Join(target, f)
+		if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+			if data, err := os.ReadFile(srcPath); err == nil {
+				if err := os.WriteFile(dstPath, data, 0644); err == nil {
+					logger.DebugCF("agent", "Copied template file", map[string]interface{}{"file": f})
+				}
+			}
+		}
+	}
+
+	// 2. Copy skills directory
+	srcSkills := filepath.Join(source, "skills")
+	dstSkills := filepath.Join(target, "skills")
+	if _, err := os.Stat(srcSkills); err == nil {
+		if _, err := os.Stat(dstSkills); os.IsNotExist(err) {
+			if err := r.copyDir(srcSkills, dstSkills); err == nil {
+				logger.DebugCF("agent", "Copied skills directory", nil)
+			} else {
+				logger.WarnCF("agent", "Failed to copy skills directory", map[string]interface{}{"error": err.Error()})
+			}
+		}
+	}
+}
+
+// copyDir recursively copies a directory
+func (r *AgentRegistry) copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+
+		return r.copyFile(path, targetPath)
+	})
+}
+
+// copyFile copies a single file
+func (r *AgentRegistry) copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+
+	info, err := os.Stat(src)
+	if err == nil {
+		return os.Chmod(dst, info.Mode())
+	}
+	return nil
 }
 
 // ResolveRoute determines which agent handles the message.

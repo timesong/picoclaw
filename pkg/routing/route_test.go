@@ -31,11 +31,12 @@ func TestResolveRoute_DefaultAgent_NoBindings(t *testing.T) {
 		Peer:    &RoutePeer{Kind: "direct", ID: "user1"},
 	})
 
-	if route.AgentID != DefaultAgentID {
-		t.Errorf("AgentID = %q, want %q", route.AgentID, DefaultAgentID)
+	expectedID := "user-telegram-user1"
+	if route.AgentID != expectedID {
+		t.Errorf("AgentID = %q, want %q", route.AgentID, expectedID)
 	}
-	if route.MatchedBy != "default" {
-		t.Errorf("MatchedBy = %q, want 'default'", route.MatchedBy)
+	if route.MatchedBy != "auto.register" {
+		t.Errorf("MatchedBy = %q, want 'auto.register'", route.MatchedBy)
 	}
 }
 

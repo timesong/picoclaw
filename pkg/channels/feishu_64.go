@@ -11,6 +11,7 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
@@ -26,8 +27,9 @@ type FeishuChannel struct {
 	client   *lark.Client
 	wsClient *larkws.Client
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	mu        sync.Mutex
+	userCache sync.Map // id -> name
+	cancel    context.CancelFunc
 }
 
 func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChannel, error) {
@@ -37,6 +39,7 @@ func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChan
 		BaseChannel: base,
 		config:      cfg,
 		client:      lark.NewClient(cfg.AppID, cfg.AppSecret),
+		userCache:   sync.Map{},
 	}, nil
 }
 
@@ -128,7 +131,7 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 	return nil
 }
 
-func (c *FeishuChannel) handleMessageReceive(_ context.Context, event *larkim.P2MessageReceiveV1) error {
+func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return nil
 	}
@@ -165,6 +168,35 @@ func (c *FeishuChannel) handleMessageReceive(_ context.Context, event *larkim.P2
 		metadata["tenant_key"] = *sender.TenantKey
 	}
 
+	peerKind := "direct"
+	peerID := senderID
+	if stringValue(message.ChatType) != "p2p" {
+		peerKind = "group"
+		peerID = chatID
+	}
+	metadata["peer_kind"] = peerKind
+	metadata["peer_id"] = peerID
+
+	// Try to get user nickname
+	if sender != nil && sender.SenderId != nil {
+		idType := "open_id"
+		id := ""
+		if sender.SenderId.UserId != nil && *sender.SenderId.UserId != "" {
+			idType = "user_id"
+			id = *sender.SenderId.UserId
+		} else if sender.SenderId.OpenId != nil && *sender.SenderId.OpenId != "" {
+			idType = "open_id"
+			id = *sender.SenderId.OpenId
+		}
+
+		if id != "" {
+			nickname := c.getNickname(ctx, idType, id)
+			if nickname != "" {
+				metadata["sender_name"] = nickname
+			}
+		}
+	}
+
 	logger.InfoCF("feishu", "Feishu message received", map[string]interface{}{
 		"sender_id": senderID,
 		"chat_id":   chatID,
@@ -191,6 +223,41 @@ func extractFeishuSenderID(sender *larkim.EventSender) string {
 	}
 
 	return ""
+}
+
+func (c *FeishuChannel) getNickname(ctx context.Context, idType, id string) string {
+	if name, ok := c.userCache.Load(id); ok {
+		return name.(string)
+	}
+
+	req := larkcontact.NewGetUserReqBuilder().
+		UserId(id).
+		UserIdType(idType).
+		Build()
+
+	resp, err := c.client.Contact.V3.User.Get(ctx, req)
+	if err != nil {
+		logger.DebugCF("feishu", "Failed to fetch user info", map[string]interface{}{"error": err.Error(), "id": id})
+		return ""
+	}
+
+	if !resp.Success() || resp.Data == nil || resp.Data.User == nil {
+		logger.DebugCF("feishu", "Feishu API error fetching user", map[string]interface{}{"code": resp.Code, "msg": resp.Msg})
+		return ""
+	}
+
+	nickname := ""
+	if resp.Data.User.Name != nil {
+		nickname = *resp.Data.User.Name
+	} else if resp.Data.User.Nickname != nil {
+		nickname = *resp.Data.User.Nickname
+	}
+
+	if nickname != "" {
+		c.userCache.Store(id, nickname)
+	}
+
+	return nickname
 }
 
 func extractFeishuMessageContent(message *larkim.EventMessage) string {
