@@ -271,14 +271,14 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		metadata["tenant_key"] = *sender.TenantKey
 	}
 
-	peerKind := "direct"
-	peerID := senderID
-	if stringValue(message.ChatType) != "p2p" {
-		peerKind = "group"
-		peerID = chatID
+	chatType := stringValue(message.ChatType)
+	if chatType == "p2p" {
+		metadata["peer_kind"] = "direct"
+		metadata["peer_id"] = senderID
+	} else {
+		metadata["peer_kind"] = "group"
+		metadata["peer_id"] = chatID
 	}
-	metadata["peer_kind"] = peerKind
-	metadata["peer_id"] = peerID
 
 	// Try to get user nickname
 	if sender != nil && sender.SenderId != nil {

@@ -173,7 +173,8 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
 	}
 
-	// 1. Build initial sequence
+	history = sanitizeHistoryForProvider(history)
+
 	messages := make([]providers.Message, 0)
 	messages = append(messages, providers.Message{
 		Role:    "system",
@@ -182,7 +183,7 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 
 	messages = append(messages, history...)
 
-	if currentMessage != "" {
+	if strings.TrimSpace(currentMessage) != "" {
 		messages = append(messages, providers.Message{
 			Role:    "user",
 			Content: currentMessage,
@@ -262,6 +263,48 @@ func (cb *ContextBuilder) HealProtocol(messages []providers.Message) []providers
 	// However, our loop logic ensures tool messages ONLY follow assistant calls.
 
 	return healed
+}
+
+func sanitizeHistoryForProvider(history []providers.Message) []providers.Message {
+	if len(history) == 0 {
+		return history
+	}
+
+	sanitized := make([]providers.Message, 0, len(history))
+	for _, msg := range history {
+		switch msg.Role {
+		case "tool":
+			if len(sanitized) == 0 {
+				logger.DebugCF("agent", "Dropping orphaned leading tool message", map[string]interface{}{})
+				continue
+			}
+			last := sanitized[len(sanitized)-1]
+			if last.Role != "assistant" || len(last.ToolCalls) == 0 {
+				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]interface{}{})
+				continue
+			}
+			sanitized = append(sanitized, msg)
+
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				if len(sanitized) == 0 {
+					logger.DebugCF("agent", "Dropping assistant tool-call turn at history start", map[string]interface{}{})
+					continue
+				}
+				prev := sanitized[len(sanitized)-1]
+				if prev.Role != "user" && prev.Role != "tool" {
+					logger.DebugCF("agent", "Dropping assistant tool-call turn with invalid predecessor", map[string]interface{}{"prev_role": prev.Role})
+					continue
+				}
+			}
+			sanitized = append(sanitized, msg)
+
+		default:
+			sanitized = append(sanitized, msg)
+		}
+	}
+
+	return sanitized
 }
 
 func (cb *ContextBuilder) AddToolResult(messages []providers.Message, toolCallID, toolName, result string) []providers.Message {
