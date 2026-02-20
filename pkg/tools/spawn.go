@@ -31,7 +31,7 @@ func (t *SpawnTool) Name() string {
 }
 
 func (t *SpawnTool) Description() string {
-	return "Spawn a subagent to handle a task in the background. Use this for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done."
+	return "Spawn a subagent to handle a task in the background. Use this for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done. IMPORTANT: DO NOT use this tool for scheduling, reminders, waiting or delaying tasks. For any time-based tasks or reminders, you MUST use the 'cron' tool instead."
 }
 
 func (t *SpawnTool) Parameters() map[string]interface{} {

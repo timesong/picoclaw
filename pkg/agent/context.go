@@ -158,8 +158,6 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 }
 
 func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary string, currentMessage string, media []string, channel, chatID, senderName string) []providers.Message {
-	messages := []providers.Message{}
-
 	systemPrompt := cb.BuildSystemPrompt()
 
 	// Add Current Session info if provided
@@ -171,39 +169,12 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		systemPrompt += sessionInfo
 	}
 
-	// Log system prompt summary for debugging (debug mode only)
-	logger.DebugCF("agent", "System prompt built",
-		map[string]interface{}{
-			"total_chars":   len(systemPrompt),
-			"total_lines":   strings.Count(systemPrompt, "\n") + 1,
-			"section_count": strings.Count(systemPrompt, "\n\n---\n\n") + 1,
-		})
-
-	// Log preview of system prompt (avoid logging huge content)
-	preview := systemPrompt
-	if len(preview) > 500 {
-		preview = preview[:500] + "... (truncated)"
-	}
-	logger.DebugCF("agent", "System prompt preview",
-		map[string]interface{}{
-			"preview": preview,
-		})
-
 	if summary != "" {
 		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
 	}
 
-	//This fix prevents the session memory from LLM failure due to elimination of toolu_IDs required from LLM
-	// --- INICIO DEL FIX ---
-	//Diegox-17
-	for len(history) > 0 && (history[0].Role == "tool") {
-		logger.DebugCF("agent", "Removing orphaned tool message from history to prevent LLM error",
-			map[string]interface{}{"role": history[0].Role})
-		history = history[1:]
-	}
-	//Diegox-17
-	// --- FIN DEL FIX ---
-
+	// 1. Build initial sequence
+	messages := make([]providers.Message, 0)
 	messages = append(messages, providers.Message{
 		Role:    "system",
 		Content: systemPrompt,
@@ -211,12 +182,86 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 
 	messages = append(messages, history...)
 
-	messages = append(messages, providers.Message{
-		Role:    "user",
-		Content: currentMessage,
-	})
+	if currentMessage != "" {
+		messages = append(messages, providers.Message{
+			Role:    "user",
+			Content: currentMessage,
+		})
+	}
 
-	return messages
+	// 2. Protocol Fix: Use a robust healer to ensure the sequence is valid for any API
+	return cb.HealProtocol(messages)
+}
+
+// HealProtocol ensures the message sequence follows strict LLM API rules:
+// 1. First message must be 'system' or 'user' (never 'tool').
+// 2. Messages with role 'tool' must follow an 'assistant' message with 'tool_calls'.
+// 3. 'assistant' messages with 'tool_calls' must be followed by their corresponding 'tool' messages.
+// 4. No non-tool message can interrupt an assistant-tool chain.
+func (cb *ContextBuilder) HealProtocol(messages []providers.Message) []providers.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	healed := make([]providers.Message, 0, len(messages))
+	var lastAssistantWithTools *providers.Message
+	pendingToolIDs := make(map[string]bool)
+
+	for i := 0; i < len(messages); i++ {
+		m := messages[i]
+
+		if m.Role == "tool" {
+			// Rule: Tool message must have a preceding assistant call
+			if !pendingToolIDs[m.ToolCallID] {
+				logger.WarnCF("agent", "HealProtocol: Removing orphan tool message", map[string]interface{}{"id": m.ToolCallID})
+				continue
+			}
+			delete(pendingToolIDs, m.ToolCallID)
+			healed = append(healed, m)
+			continue
+		}
+
+		// Non-tool message encountered.
+		// If we had an assistant calling tools, and we reached a user/system message before all tools responded,
+		// we MUST clean up that assistant message's tool_calls to avoid 400 errors.
+		if len(pendingToolIDs) > 0 && lastAssistantWithTools != nil {
+			logger.WarnCF("agent", "HealProtocol: Breaking tool chain due to intervening message", map[string]interface{}{
+				"role":           m.Role,
+				"orphaned_count": len(pendingToolIDs),
+			})
+			lastAssistantWithTools.ToolCalls = nil
+			pendingToolIDs = make(map[string]bool)
+		}
+
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			lastAssistantWithTools = &m
+			for _, tc := range m.ToolCalls {
+				pendingToolIDs[tc.ID] = true
+			}
+			healed = append(healed, m)
+			// Small hack: if we modified the pointer m, we need to ensure the refreshed lastAssistantWithTools
+			// is the one in the 'healed' slice.
+			lastAssistantWithTools = &healed[len(healed)-1]
+		} else {
+			// Normal user/system message
+			healed = append(healed, m)
+			lastAssistantWithTools = nil
+		}
+	}
+
+	// Final check: if the last message is an assistant calling tools with no responses,
+	// and there are no more messages coming (EOF), we must strip tool_calls to allow the LLM to just "talk".
+	if len(pendingToolIDs) > 0 && lastAssistantWithTools != nil {
+		logger.WarnCF("agent", "HealProtocol: Stripping terminal tool calls with no responses", nil)
+		lastAssistantWithTools.ToolCalls = nil
+	}
+
+	// DeepScan Rule: First non-system message should not be 'tool'
+	// Since we already filtered out orphan tools in the loop, healed[0] is system.
+	// But if healed[1] is 'tool' for some reason, we'd still be in trouble.
+	// However, our loop logic ensures tool messages ONLY follow assistant calls.
+
+	return healed
 }
 
 func (cb *ContextBuilder) AddToolResult(messages []providers.Message, toolCallID, toolName, result string) []providers.Message {

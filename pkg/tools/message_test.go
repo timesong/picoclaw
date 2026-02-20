@@ -4,17 +4,17 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/bus"
 )
 
 func TestMessageTool_Execute_Success(t *testing.T) {
 	tool := NewMessageTool()
 	tool.SetContext("test-channel", "test-chat-id")
 
-	var sentChannel, sentChatID, sentContent string
-	tool.SetSendCallback(func(channel, chatID, content string) error {
-		sentChannel = channel
-		sentChatID = chatID
-		sentContent = content
+	var sentMsg bus.OutboundMessage
+	tool.SetSendCallback(func(msg bus.OutboundMessage) error {
+		sentMsg = msg
 		return nil
 	})
 
@@ -26,14 +26,14 @@ func TestMessageTool_Execute_Success(t *testing.T) {
 	result := tool.Execute(ctx, args)
 
 	// Verify message was sent with correct parameters
-	if sentChannel != "test-channel" {
-		t.Errorf("Expected channel 'test-channel', got '%s'", sentChannel)
+	if sentMsg.Channel != "test-channel" {
+		t.Errorf("Expected channel 'test-channel', got '%s'", sentMsg.Channel)
 	}
-	if sentChatID != "test-chat-id" {
-		t.Errorf("Expected chatID 'test-chat-id', got '%s'", sentChatID)
+	if sentMsg.ChatID != "test-chat-id" {
+		t.Errorf("Expected chatID 'test-chat-id', got '%s'", sentMsg.ChatID)
 	}
-	if sentContent != "Hello, world!" {
-		t.Errorf("Expected content 'Hello, world!', got '%s'", sentContent)
+	if sentMsg.Content != "Hello, world!" {
+		t.Errorf("Expected content 'Hello, world!', got '%s'", sentMsg.Content)
 	}
 
 	// Verify ToolResult meets US-011 criteria:
@@ -62,28 +62,31 @@ func TestMessageTool_Execute_WithCustomChannel(t *testing.T) {
 	tool := NewMessageTool()
 	tool.SetContext("default-channel", "default-chat-id")
 
-	var sentChannel, sentChatID string
-	tool.SetSendCallback(func(channel, chatID, content string) error {
-		sentChannel = channel
-		sentChatID = chatID
+	var sentMsg bus.OutboundMessage
+	tool.SetSendCallback(func(msg bus.OutboundMessage) error {
+		sentMsg = msg
 		return nil
 	})
 
 	ctx := context.Background()
 	args := map[string]interface{}{
-		"content": "Test message",
-		"channel": "custom-channel",
-		"chat_id": "custom-chat-id",
+		"content":  "Test message",
+		"channel":  "custom-channel",
+		"chat_id":  "custom-chat-id",
+		"msg_type": "interactive",
 	}
 
 	result := tool.Execute(ctx, args)
 
 	// Verify custom channel/chatID were used instead of defaults
-	if sentChannel != "custom-channel" {
-		t.Errorf("Expected channel 'custom-channel', got '%s'", sentChannel)
+	if sentMsg.Channel != "custom-channel" {
+		t.Errorf("Expected channel 'custom-channel', got '%s'", sentMsg.Channel)
 	}
-	if sentChatID != "custom-chat-id" {
-		t.Errorf("Expected chatID 'custom-chat-id', got '%s'", sentChatID)
+	if sentMsg.ChatID != "custom-chat-id" {
+		t.Errorf("Expected chatID 'custom-chat-id', got '%s'", sentMsg.ChatID)
+	}
+	if sentMsg.Metadata["msg_type"] != "interactive" {
+		t.Errorf("Expected msg_type 'interactive', got '%s'", sentMsg.Metadata["msg_type"])
 	}
 
 	if !result.Silent {
@@ -94,12 +97,35 @@ func TestMessageTool_Execute_WithCustomChannel(t *testing.T) {
 	}
 }
 
+func TestMessageTool_Execute_WithMedia(t *testing.T) {
+	tool := NewMessageTool()
+	tool.SetContext("test-channel", "test-chat-id")
+
+	var sentMsg bus.OutboundMessage
+	tool.SetSendCallback(func(msg bus.OutboundMessage) error {
+		sentMsg = msg
+		return nil
+	})
+
+	ctx := context.Background()
+	args := map[string]interface{}{
+		"content": "Check this image",
+		"media":   []interface{}{"/path/to/image.png"},
+	}
+
+	tool.Execute(ctx, args)
+
+	if len(sentMsg.Media) != 1 || sentMsg.Media[0] != "/path/to/image.png" {
+		t.Errorf("Expected media ['/path/to/image.png'], got %v", sentMsg.Media)
+	}
+}
+
 func TestMessageTool_Execute_SendFailure(t *testing.T) {
 	tool := NewMessageTool()
 	tool.SetContext("test-channel", "test-chat-id")
 
 	sendErr := errors.New("network error")
-	tool.SetSendCallback(func(channel, chatID, content string) error {
+	tool.SetSendCallback(func(msg bus.OutboundMessage) error {
 		return sendErr
 	})
 
@@ -153,7 +179,7 @@ func TestMessageTool_Execute_NoTargetChannel(t *testing.T) {
 	tool := NewMessageTool()
 	// No SetContext called, so defaultChannel and defaultChatID are empty
 
-	tool.SetSendCallback(func(channel, chatID, content string) error {
+	tool.SetSendCallback(func(msg bus.OutboundMessage) error {
 		return nil
 	})
 

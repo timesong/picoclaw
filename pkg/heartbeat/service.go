@@ -28,23 +28,30 @@ const (
 
 // HeartbeatHandler is the function type for handling heartbeat.
 // It returns a ToolResult that can indicate async operations.
-// channel and chatID are derived from the last active user channel.
-type HeartbeatHandler func(prompt, channel, chatID string) *tools.ToolResult
+// agentID allows routing to the correct tenant context.
+// channel and chatID are derived from the last active user channel for that agent.
+type HeartbeatHandler func(agentID, prompt, channel, chatID string) *tools.ToolResult
 
-// HeartbeatService manages periodic heartbeat checks
+// HeartbeatTarget represents a single agent's heartbeat context
+type HeartbeatTarget struct {
+	ID        string
+	Workspace string
+	State     *state.Manager
+}
+
+// HeartbeatService manages periodic heartbeat checks for multiple agents
 type HeartbeatService struct {
-	workspace string
-	bus       *bus.MessageBus
-	state     *state.Manager
-	handler   HeartbeatHandler
-	interval  time.Duration
-	enabled   bool
-	mu        sync.RWMutex
-	stopChan  chan struct{}
+	targets  map[string]*HeartbeatTarget
+	bus      *bus.MessageBus
+	handler  HeartbeatHandler
+	interval time.Duration
+	enabled  bool
+	mu       sync.RWMutex
+	stopChan chan struct{}
 }
 
 // NewHeartbeatService creates a new heartbeat service
-func NewHeartbeatService(workspace string, intervalMinutes int, enabled bool) *HeartbeatService {
+func NewHeartbeatService(intervalMinutes int, enabled bool) *HeartbeatService {
 	// Apply minimum interval
 	if intervalMinutes < minIntervalMinutes && intervalMinutes != 0 {
 		intervalMinutes = minIntervalMinutes
@@ -55,11 +62,31 @@ func NewHeartbeatService(workspace string, intervalMinutes int, enabled bool) *H
 	}
 
 	return &HeartbeatService{
-		workspace: workspace,
-		interval:  time.Duration(intervalMinutes) * time.Minute,
-		enabled:   enabled,
-		state:     state.NewManager(workspace),
+		targets:  make(map[string]*HeartbeatTarget),
+		interval: time.Duration(intervalMinutes) * time.Minute,
+		enabled:  enabled,
 	}
+}
+
+// AddTarget adds a new agent workspace to be monitored by heartbeat
+func (hs *HeartbeatService) AddTarget(agentID, workspace string) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+
+	if _, exists := hs.targets[agentID]; exists {
+		return
+	}
+
+	hs.targets[agentID] = &HeartbeatTarget{
+		ID:        agentID,
+		Workspace: workspace,
+		State:     state.NewManager(workspace),
+	}
+
+	logger.InfoCF("heartbeat", "Added heartbeat target", map[string]any{
+		"agent_id":  agentID,
+		"workspace": workspace,
+	})
 }
 
 // SetBus sets the message bus for delivering heartbeat results.
@@ -96,6 +123,7 @@ func (hs *HeartbeatService) Start() error {
 
 	logger.InfoCF("heartbeat", "Heartbeat service started", map[string]any{
 		"interval_minutes": hs.interval.Minutes(),
+		"targets_count":    len(hs.targets),
 	})
 
 	return nil
@@ -127,10 +155,9 @@ func (hs *HeartbeatService) runLoop(stopChan chan struct{}) {
 	ticker := time.NewTicker(hs.interval)
 	defer ticker.Stop()
 
-	// Run first heartbeat after initial delay
-	time.AfterFunc(time.Second, func() {
-		hs.executeHeartbeat()
-	})
+	// Initial delay to let agents initialize
+	time.Sleep(2 * time.Second)
+	hs.executeHeartbeat()
 
 	for {
 		select {
@@ -142,90 +169,92 @@ func (hs *HeartbeatService) runLoop(stopChan chan struct{}) {
 	}
 }
 
-// executeHeartbeat performs a single heartbeat check
+// executeHeartbeat performs heartbeat checks for all targets
 func (hs *HeartbeatService) executeHeartbeat() {
 	hs.mu.RLock()
-	enabled := hs.enabled
-	handler := hs.handler
 	if !hs.enabled || hs.stopChan == nil {
 		hs.mu.RUnlock()
 		return
 	}
+
+	// Copy targets to process outside lock
+	targets := make([]*HeartbeatTarget, 0, len(hs.targets))
+	for _, t := range hs.targets {
+		targets = append(targets, t)
+	}
+	handler := hs.handler
 	hs.mu.RUnlock()
 
-	if !enabled {
-		return
-	}
-
-	logger.DebugC("heartbeat", "Executing heartbeat")
-
-	prompt := hs.buildPrompt()
-	if prompt == "" {
-		logger.InfoC("heartbeat", "No heartbeat prompt (HEARTBEAT.md empty or missing)")
-		return
-	}
-
 	if handler == nil {
-		hs.logError("Heartbeat handler not configured")
+		hs.logAllTargets("ERROR", "Heartbeat handler not configured")
+		return
+	}
+
+	logger.DebugCF("heartbeat", "Executing heartbeats for all targets", map[string]any{
+		"count": len(targets),
+	})
+
+	for _, target := range targets {
+		hs.processTarget(target, handler)
+	}
+}
+
+func (hs *HeartbeatService) processTarget(target *HeartbeatTarget, handler HeartbeatHandler) {
+	prompt := hs.buildPrompt(target.Workspace)
+	if prompt == "" {
 		return
 	}
 
 	// Get last channel info for context
-	lastChannel := hs.state.GetLastChannel()
-	channel, chatID := hs.parseLastChannel(lastChannel)
+	lastChannel := target.State.GetLastChannel()
+	channel, chatID := hs.parseLastChannel(target, lastChannel)
 
 	// Debug log for channel resolution
-	hs.logInfo("Resolved channel: %s, chatID: %s (from lastChannel: %s)", channel, chatID, lastChannel)
+	hs.log(target, "INFO", "Resolved channel: %s, chatID: %s (from lastChannel: %s)", channel, chatID, lastChannel)
 
-	result := handler(prompt, channel, chatID)
+	result := handler(target.ID, prompt, channel, chatID)
 
 	if result == nil {
-		hs.logInfo("Heartbeat handler returned nil result")
 		return
 	}
 
 	// Handle different result types
 	if result.IsError {
-		hs.logError("Heartbeat error: %s", result.ForLLM)
+		hs.log(target, "ERROR", "Heartbeat error: %s", result.ForLLM)
 		return
 	}
 
 	if result.Async {
-		hs.logInfo("Async task started: %s", result.ForLLM)
-		logger.InfoCF("heartbeat", "Async heartbeat task started",
-			map[string]interface{}{
-				"message": result.ForLLM,
-			})
+		hs.log(target, "INFO", "Async task started: %s", result.ForLLM)
 		return
 	}
 
 	// Check if silent
 	if result.Silent {
-		hs.logInfo("Heartbeat OK - silent")
+		hs.log(target, "INFO", "Heartbeat OK - silent")
 		return
 	}
 
 	// Send result to user
 	if result.ForUser != "" {
-		hs.sendResponse(result.ForUser)
+		hs.sendResponse(target, result.ForUser)
 	} else if result.ForLLM != "" {
-		hs.sendResponse(result.ForLLM)
+		hs.sendResponse(target, result.ForLLM)
 	}
 
-	hs.logInfo("Heartbeat completed: %s", result.ForLLM)
+	hs.log(target, "INFO", "Heartbeat completed: %s", result.ForLLM)
 }
 
-// buildPrompt builds the heartbeat prompt from HEARTBEAT.md
-func (hs *HeartbeatService) buildPrompt() string {
-	heartbeatPath := filepath.Join(hs.workspace, "HEARTBEAT.md")
+// buildPrompt builds the heartbeat prompt from HEARTBEAT.md in target workspace
+func (hs *HeartbeatService) buildPrompt(workspace string) string {
+	heartbeatPath := filepath.Join(workspace, "HEARTBEAT.md")
 
 	data, err := os.ReadFile(heartbeatPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			hs.createDefaultHeartbeatTemplate()
+			hs.createDefaultHeartbeatTemplate(workspace)
 			return ""
 		}
-		hs.logError("Error reading HEARTBEAT.md: %v", err)
 		return ""
 	}
 
@@ -248,8 +277,8 @@ If there is nothing that requires attention, respond ONLY with: HEARTBEAT_OK
 }
 
 // createDefaultHeartbeatTemplate creates the default HEARTBEAT.md file
-func (hs *HeartbeatService) createDefaultHeartbeatTemplate() {
-	heartbeatPath := filepath.Join(hs.workspace, "HEARTBEAT.md")
+func (hs *HeartbeatService) createDefaultHeartbeatTemplate(workspace string) {
+	heartbeatPath := filepath.Join(workspace, "HEARTBEAT.md")
 
 	defaultContent := `# Heartbeat Check List
 
@@ -275,32 +304,28 @@ This file contains tasks for the heartbeat service to check periodically.
 Add your heartbeat tasks below this line:
 `
 
-	if err := os.WriteFile(heartbeatPath, []byte(defaultContent), 0644); err != nil {
-		hs.logError("Failed to create default HEARTBEAT.md: %v", err)
-	} else {
-		hs.logInfo("Created default HEARTBEAT.md template")
+	if err := os.WriteFile(heartbeatPath, []byte(defaultContent), 0644); err == nil {
+		logger.DebugCF("heartbeat", "Created default HEARTBEAT.md", map[string]any{"path": heartbeatPath})
 	}
 }
 
-// sendResponse sends the heartbeat response to the last channel
-func (hs *HeartbeatService) sendResponse(response string) {
+// sendResponse sends the heartbeat response to the last channel of the target agent
+func (hs *HeartbeatService) sendResponse(target *HeartbeatTarget, response string) {
 	hs.mu.RLock()
 	msgBus := hs.bus
 	hs.mu.RUnlock()
 
 	if msgBus == nil {
-		hs.logInfo("No message bus configured, heartbeat result not sent")
 		return
 	}
 
 	// Get last channel from state
-	lastChannel := hs.state.GetLastChannel()
+	lastChannel := target.State.GetLastChannel()
 	if lastChannel == "" {
-		hs.logInfo("No last channel recorded, heartbeat result not sent")
 		return
 	}
 
-	platform, userID := hs.parseLastChannel(lastChannel)
+	platform, userID := hs.parseLastChannel(target, lastChannel)
 
 	// Skip internal channels that can't receive messages
 	if platform == "" || userID == "" {
@@ -313,12 +338,11 @@ func (hs *HeartbeatService) sendResponse(response string) {
 		Content: response,
 	})
 
-	hs.logInfo("Heartbeat result sent to %s", platform)
+	hs.log(target, "INFO", "Heartbeat result sent to %s", platform)
 }
 
 // parseLastChannel parses the last channel string into platform and userID.
-// Returns empty strings for invalid or internal channels.
-func (hs *HeartbeatService) parseLastChannel(lastChannel string) (platform, userID string) {
+func (hs *HeartbeatService) parseLastChannel(target *HeartbeatTarget, lastChannel string) (platform, userID string) {
 	if lastChannel == "" {
 		return "", ""
 	}
@@ -326,7 +350,7 @@ func (hs *HeartbeatService) parseLastChannel(lastChannel string) (platform, user
 	// Parse channel format: "platform:user_id" (e.g., "telegram:123456")
 	parts := strings.SplitN(lastChannel, ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		hs.logError("Invalid last channel format: %s", lastChannel)
+		hs.log(target, "ERROR", "Invalid last channel format: %s", lastChannel)
 		return "", ""
 	}
 
@@ -334,26 +358,20 @@ func (hs *HeartbeatService) parseLastChannel(lastChannel string) (platform, user
 
 	// Skip internal channels
 	if constants.IsInternalChannel(platform) {
-		hs.logInfo("Skipping internal channel: %s", platform)
 		return "", ""
 	}
 
 	return platform, userID
 }
 
-// logInfo logs an informational message to the heartbeat log
-func (hs *HeartbeatService) logInfo(format string, args ...any) {
-	hs.log("INFO", format, args...)
-}
+// log writes a message to the heartbeat log file in the target's workspace
+func (hs *HeartbeatService) log(target *HeartbeatTarget, level, format string, args ...any) {
+	logFile := filepath.Join(target.Workspace, "heartbeat.log")
+	// If logs directory exists, use it
+	if _, err := os.Stat(filepath.Join(target.Workspace, "logs")); err == nil {
+		logFile = filepath.Join(target.Workspace, "logs", "heartbeat.log")
+	}
 
-// logError logs an error message to the heartbeat log
-func (hs *HeartbeatService) logError(format string, args ...any) {
-	hs.log("ERROR", format, args...)
-}
-
-// log writes a message to the heartbeat log file
-func (hs *HeartbeatService) log(level, format string, args ...any) {
-	logFile := filepath.Join(hs.workspace, "heartbeat.log")
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
@@ -362,4 +380,12 @@ func (hs *HeartbeatService) log(level, format string, args ...any) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	fmt.Fprintf(f, "[%s] [%s] %s\n", timestamp, level, fmt.Sprintf(format, args...))
+}
+
+func (hs *HeartbeatService) logAllTargets(level, message string) {
+	hs.mu.RLock()
+	defer hs.mu.RUnlock()
+	for _, target := range hs.targets {
+		hs.log(target, level, "%s", message)
+	}
 }

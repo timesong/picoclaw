@@ -3,9 +3,11 @@ package tools
 import (
 	"context"
 	"fmt"
+
+	"github.com/sipeed/picoclaw/pkg/bus"
 )
 
-type SendCallback func(channel, chatID, content string) error
+type SendCallback func(msg bus.OutboundMessage) error
 
 type MessageTool struct {
 	sendCallback   SendCallback
@@ -23,7 +25,7 @@ func (t *MessageTool) Name() string {
 }
 
 func (t *MessageTool) Description() string {
-	return "Send a message to user on a chat channel. Use this when you want to communicate something."
+	return "Send a message to user on a chat channel. Support rich content like images and interactive cards on platforms like Feishu."
 }
 
 func (t *MessageTool) Parameters() map[string]interface{} {
@@ -32,15 +34,24 @@ func (t *MessageTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"content": map[string]interface{}{
 				"type":        "string",
-				"description": "The message content to send",
+				"description": "The message text or JSON card content to send",
+			},
+			"media": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional: list of local file paths or URLs to images/files to attach",
 			},
 			"channel": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional: target channel (telegram, whatsapp, etc.)",
+				"description": "Optional: target channel (telegram, feishu, etc.)",
 			},
 			"chat_id": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional: target chat/user ID",
+			},
+			"msg_type": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional: platform specific message type (e.g. 'interactive' for Feishu card)",
 			},
 		},
 		"required": []string{"content"},
@@ -70,6 +81,16 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]interface{}) 
 
 	channel, _ := args["channel"].(string)
 	chatID, _ := args["chat_id"].(string)
+	msgType, _ := args["msg_type"].(string)
+
+	var media []string
+	if m, ok := args["media"].([]interface{}); ok {
+		for _, v := range m {
+			if s, ok := v.(string); ok {
+				media = append(media, s)
+			}
+		}
+	}
 
 	if channel == "" {
 		channel = t.defaultChannel
@@ -86,7 +107,20 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]interface{}) 
 		return &ToolResult{ForLLM: "Message sending not configured", IsError: true}
 	}
 
-	if err := t.sendCallback(channel, chatID, content); err != nil {
+	metadata := make(map[string]string)
+	if msgType != "" {
+		metadata["msg_type"] = msgType
+	}
+
+	outMsg := bus.OutboundMessage{
+		Channel:  channel,
+		ChatID:   chatID,
+		Content:  content,
+		Media:    media,
+		Metadata: metadata,
+	}
+
+	if err := t.sendCallback(outMsg); err != nil {
 		return &ToolResult{
 			ForLLM:  fmt.Sprintf("sending message: %v", err),
 			IsError: true,

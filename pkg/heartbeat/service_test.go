@@ -16,7 +16,8 @@ func TestExecuteHeartbeat_Async(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	hs.AddTarget("main", tmpDir)
 	hs.stopChan = make(chan struct{}) // Enable for testing
 
 	asyncCalled := false
@@ -28,8 +29,11 @@ func TestExecuteHeartbeat_Async(t *testing.T) {
 		Async:   true,
 	}
 
-	hs.SetHandler(func(prompt, channel, chatID string) *tools.ToolResult {
+	hs.SetHandler(func(agentID, prompt, channel, chatID string) *tools.ToolResult {
 		asyncCalled = true
+		if agentID != "main" {
+			t.Errorf("Expected agentID 'main', got '%s'", agentID)
+		}
 		if prompt == "" {
 			t.Error("Expected non-empty prompt")
 		}
@@ -54,10 +58,11 @@ func TestExecuteHeartbeat_Error(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	hs.AddTarget("main", tmpDir)
 	hs.stopChan = make(chan struct{}) // Enable for testing
 
-	hs.SetHandler(func(prompt, channel, chatID string) *tools.ToolResult {
+	hs.SetHandler(func(agentID, prompt, channel, chatID string) *tools.ToolResult {
 		return &tools.ToolResult{
 			ForLLM:  "Heartbeat failed: connection error",
 			ForUser: "",
@@ -92,10 +97,11 @@ func TestExecuteHeartbeat_Silent(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	hs.AddTarget("main", tmpDir)
 	hs.stopChan = make(chan struct{}) // Enable for testing
 
-	hs.SetHandler(func(prompt, channel, chatID string) *tools.ToolResult {
+	hs.SetHandler(func(agentID, prompt, channel, chatID string) *tools.ToolResult {
 		return &tools.ToolResult{
 			ForLLM:  "Heartbeat completed successfully",
 			ForUser: "",
@@ -130,7 +136,8 @@ func TestHeartbeatService_StartStop(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 1, true)
+	hs := NewHeartbeatService(1, true)
+	hs.AddTarget("main", tmpDir)
 
 	err = hs.Start()
 	if err != nil {
@@ -149,7 +156,8 @@ func TestHeartbeatService_Disabled(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 1, false)
+	hs := NewHeartbeatService(1, false)
+	hs.AddTarget("main", tmpDir)
 
 	if hs.enabled != false {
 		t.Error("Expected service to be disabled")
@@ -166,10 +174,11 @@ func TestExecuteHeartbeat_NilResult(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	hs.AddTarget("main", tmpDir)
 	hs.stopChan = make(chan struct{}) // Enable for testing
 
-	hs.SetHandler(func(prompt, channel, chatID string) *tools.ToolResult {
+	hs.SetHandler(func(agentID, prompt, channel, chatID string) *tools.ToolResult {
 		return nil
 	})
 
@@ -188,10 +197,12 @@ func TestLogPath(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	target := &HeartbeatTarget{ID: "main", Workspace: tmpDir}
+	hs.targets["main"] = target
 
 	// Write a log entry
-	hs.log("INFO", "Test log entry")
+	hs.log(target, "INFO", "Test log entry")
 
 	// Verify log file exists at workspace root
 	expectedLogPath := filepath.Join(tmpDir, "heartbeat.log")
@@ -208,10 +219,11 @@ func TestHeartbeatFilePath(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	hs := NewHeartbeatService(tmpDir, 30, true)
+	hs := NewHeartbeatService(30, true)
+	hs.AddTarget("main", tmpDir)
 
 	// Trigger default template creation
-	hs.buildPrompt()
+	hs.buildPrompt(tmpDir)
 
 	// Verify HEARTBEAT.md exists at workspace root
 	expectedPath := filepath.Join(tmpDir, "HEARTBEAT.md")

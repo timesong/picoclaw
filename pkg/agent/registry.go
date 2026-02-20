@@ -17,12 +17,14 @@ import (
 
 // AgentRegistry manages multiple agent instances and routes messages to them.
 type AgentRegistry struct {
-	agents   map[string]*AgentInstance
-	resolver *routing.RouteResolver
-	mu       sync.RWMutex
-	cfg      *config.Config
-	bus      *bus.MessageBus
-	provider providers.LLMProvider
+	agents            map[string]*AgentInstance
+	resolver          *routing.RouteResolver
+	mu                sync.RWMutex
+	cfg               *config.Config
+	bus               *bus.MessageBus
+	provider          providers.LLMProvider
+	OnAgentRegistered func(id, workspace string)
+	globalTools       []tools.Tool
 }
 
 // NewAgentRegistry creates a registry from config, instantiating all agents.
@@ -67,6 +69,23 @@ func NewAgentRegistry(
 	}
 
 	return registry
+}
+
+func (r *AgentRegistry) SetOnAgentRegistered(cb func(id, workspace string)) {
+	r.mu.Lock()
+	r.OnAgentRegistered = cb
+	// Collect existing agents to notify
+	type agentInfo struct{ id, ws string }
+	var existing []agentInfo
+	for id, agent := range r.agents {
+		existing = append(existing, agentInfo{id, agent.Workspace})
+	}
+	r.mu.Unlock()
+
+	// Notify for existing agents
+	for _, a := range existing {
+		cb(a.id, a.ws)
+	}
 }
 
 // GetAgent returns the agent instance for a given ID.
@@ -119,10 +138,27 @@ func (r *AgentRegistry) GetAgent(agentID string) (*AgentInstance, bool) {
 				"model":     instance.Model,
 			})
 
+		// Notify callback outside lock
+		if cb := r.OnAgentRegistered; cb != nil {
+			go cb(id, instance.Workspace)
+		}
+
 		return instance, true
 	}
 
 	return nil, false
+}
+
+// RegisterGlobalTool registers a tool that should be available to all current and future agents.
+func (r *AgentRegistry) RegisterGlobalTool(tool tools.Tool) {
+	r.mu.Lock()
+	r.globalTools = append(r.globalTools, tool)
+
+	// Also register to all currently running agents
+	for _, agent := range r.agents {
+		agent.Tools.Register(tool)
+	}
+	r.mu.Unlock()
 }
 
 // registerToolsToAgent registers tools that are shared across all agents.
@@ -148,12 +184,8 @@ func (r *AgentRegistry) registerToolsToAgent(agent *AgentInstance) {
 
 	// Message tool
 	messageTool := tools.NewMessageTool()
-	messageTool.SetSendCallback(func(channel, chatID, content string) error {
-		r.bus.PublishOutbound(bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: content,
-		})
+	messageTool.SetSendCallback(func(msg bus.OutboundMessage) error {
+		r.bus.PublishOutbound(msg)
 		return nil
 	})
 	agent.Tools.Register(messageTool)
@@ -166,6 +198,11 @@ func (r *AgentRegistry) registerToolsToAgent(agent *AgentInstance) {
 		return r.CanSpawnSubagent(currentAgentID, targetAgentID)
 	})
 	agent.Tools.Register(spawnTool)
+
+	// Register any dynamically added global tools
+	for _, t := range r.globalTools {
+		agent.Tools.Register(t)
+	}
 
 	// Update context builder with the complete tools registry
 	agent.ContextBuilder.SetToolsRegistry(agent.Tools)

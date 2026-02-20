@@ -127,15 +127,15 @@ func (al *AgentLoop) Stop() {
 }
 
 func (al *AgentLoop) RegisterTool(tool tools.Tool) {
-	for _, agentID := range al.registry.ListAgentIDs() {
-		if agent, ok := al.registry.GetAgent(agentID); ok {
-			agent.Tools.Register(tool)
-		}
-	}
+	al.registry.RegisterGlobalTool(tool)
 }
 
 func (al *AgentLoop) SetChannelManager(cm *channels.Manager) {
 	al.channelManager = cm
+}
+
+func (al *AgentLoop) Registry() *AgentRegistry {
+	return al.registry
 }
 
 // RecordLastChannel records the last active channel for this workspace.
@@ -172,11 +172,25 @@ func (al *AgentLoop) ProcessDirectWithChannel(ctx context.Context, content, sess
 	return al.processMessage(ctx, msg)
 }
 
-// ProcessHeartbeat processes a heartbeat request without session history.
+// ProcessHeartbeat processes a heartbeat request for a specific agent without session history.
 // Each heartbeat is independent and doesn't accumulate context.
-func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, content, channel, chatID string) (string, error) {
-	agent := al.registry.GetDefaultAgent()
-	return al.runAgentLoop(ctx, agent, processOptions{
+func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, agentID, content, channel, chatID string) (string, error) {
+	var targetAgent *AgentInstance
+	if agentID != "" {
+		if a, ok := al.registry.GetAgent(agentID); ok {
+			targetAgent = a
+		}
+	}
+
+	if targetAgent == nil {
+		targetAgent = al.registry.GetDefaultAgent()
+	}
+
+	if targetAgent == nil {
+		return "", fmt.Errorf("no agent available for heartbeat")
+	}
+
+	return al.runAgentLoop(ctx, targetAgent, processOptions{
 		SessionKey:      "heartbeat",
 		Channel:         channel,
 		ChatID:          chatID,
@@ -471,10 +485,15 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, agent *AgentInstance, 
 			}
 
 			errMsg := strings.ToLower(err.Error())
-			isContextError := strings.Contains(errMsg, "token") ||
+			// Refined context error check: avoid false positives from latency timeouts ("context deadline exceeded")
+			isContextError := (strings.Contains(errMsg, "token") ||
 				strings.Contains(errMsg, "context") ||
+				strings.Contains(errMsg, "max_tokens") ||
 				strings.Contains(errMsg, "invalidparameter") ||
-				strings.Contains(errMsg, "length")
+				strings.Contains(errMsg, "length")) &&
+				!strings.Contains(errMsg, "deadline") &&
+				!strings.Contains(errMsg, "cancel") &&
+				!strings.Contains(errMsg, "timeout")
 
 			if isContextError && retry < maxRetries {
 				logger.WarnCF("agent", "Context window error detected, attempting compression", map[string]interface{}{
@@ -551,7 +570,8 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, agent *AgentInstance, 
 					Name:      tc.Name,
 					Arguments: string(argumentsJSON),
 				},
-				Name: tc.Name,
+				// Do NOT set Top-level Name or Arguments here.
+				// OpenAI/DeepSeek API expect them ONLY inside Function.
 			})
 		}
 		messages = append(messages, assistantMsg)
@@ -623,6 +643,20 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, agent *AgentInstance, 
 	return finalContent, iteration, nil
 }
 
+// findSafeCutoff ensures we don't break assistant(tool_calls)/tool message pairs.
+// It moves the cutoff index backwards until it doesn't start with a 'tool' message.
+func findSafeCutoff(messages []providers.Message, index int) int {
+	if index <= 0 || index >= len(messages) {
+		return index
+	}
+	// If the message at index is 'tool', it MUST follow its assistant caller.
+	// We move back until we reach the assistant message or the beginning.
+	for index > 0 && messages[index].Role == "tool" {
+		index--
+	}
+	return index
+}
+
 // updateToolContexts updates the context for tools that need channel/chatID info.
 func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID string) {
 	// Use ContextualTool interface instead of type assertions
@@ -649,18 +683,18 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 	tokenEstimate := al.estimateTokens(newHistory)
 	threshold := agent.ContextWindow * 75 / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	// Increase history threshold from 20 to 100 to avoid too frequent summarization
+	if len(newHistory) > 100 || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
 				defer al.summarizing.Delete(summarizeKey)
-				if !constants.IsInternalChannel(channel) {
-					al.bus.PublishOutbound(bus.OutboundMessage{
-						Channel: channel,
-						ChatID:  chatID,
-						Content: "Memory threshold reached. Optimizing conversation history...",
-					})
-				}
+				// Log locally but don't notify user in chat to avoid noise
+				logger.InfoCF("agent", "Memory threshold reached, optimizing history in background", map[string]interface{}{
+					"session":     sessionKey,
+					"history_len": len(newHistory),
+					"tokens":      tokenEstimate,
+				})
 				al.summarizeSession(agent, sessionKey)
 			}()
 		}
@@ -696,7 +730,10 @@ func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
 	// and rely on existing summary if present, or create a placeholder.
 
 	droppedCount := mid
-	keptConversation := conversation[mid:]
+	// Ensure we don't break tool response pairs
+	cutoff := findSafeCutoff(conversation, mid)
+	keptConversation := conversation[cutoff:]
+	droppedCount = cutoff
 
 	newHistory := make([]providers.Message, 0)
 	newHistory = append(newHistory, history[0]) // System prompt
@@ -808,18 +845,20 @@ func formatToolsForLog(tools []providers.ToolDefinition) string {
 
 // summarizeSession summarizes the conversation history for a session.
 func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	history := agent.Sessions.GetHistory(sessionKey)
 	summary := agent.Sessions.GetSummary(sessionKey)
 
-	// Keep last 4 messages for continuity
-	if len(history) <= 4 {
+	// Keep last messages for continuity, but ensure we don't break tool pairs
+	desiredKeep := 4
+	if len(history) < desiredKeep+1 {
 		return
 	}
-
-	toSummarize := history[:len(history)-4]
+	cutoff := findSafeCutoff(history, len(history)-desiredKeep)
+	toSummarize := history[:cutoff]
+	keepCount := len(history) - cutoff
 
 	// Oversized Message Guard
 	maxMessageTokens := agent.ContextWindow / 2
@@ -872,7 +911,7 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
-		agent.Sessions.TruncateHistory(sessionKey, 4)
+		agent.Sessions.TruncateHistory(sessionKey, keepCount)
 		agent.Sessions.Save(sessionKey)
 	}
 }
@@ -889,7 +928,7 @@ func (al *AgentLoop) summarizeBatch(ctx context.Context, agent *AgentInstance, b
 	}
 
 	response, err := agent.Provider.Chat(ctx, []providers.Message{{Role: "user", Content: prompt}}, nil, agent.Model, map[string]interface{}{
-		"max_tokens":  1024,
+		"max_tokens":  2048, // Increase max tokens for summary
 		"temperature": 0.3,
 	})
 	if err != nil {

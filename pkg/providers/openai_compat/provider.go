@@ -31,7 +31,7 @@ type Provider struct {
 
 func NewProvider(apiKey, apiBase, proxy string) *Provider {
 	client := &http.Client{
-		Timeout: 120 * time.Second,
+		Timeout: 300 * time.Second,
 	}
 
 	if proxy != "" {
@@ -61,7 +61,7 @@ func (p *Provider) Chat(ctx context.Context, messages []Message, tools []ToolDef
 
 	requestBody := map[string]interface{}{
 		"model":    model,
-		"messages": messages,
+		"messages": p.sanitizeMessages(messages),
 	}
 
 	if len(tools) > 0 {
@@ -119,6 +119,47 @@ func (p *Provider) Chat(ctx context.Context, messages []Message, tools []ToolDef
 	}
 
 	return parseResponse(body)
+}
+
+// sanitizeMessages converts internal Message objects to a format strictly compatible with OpenAI API.
+// Specifically it ensures tool_calls have only id, type, and function fields.
+func (p *Provider) sanitizeMessages(messages []Message) []map[string]interface{} {
+	sanitized := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		msg := map[string]interface{}{
+			"role": m.Role,
+		}
+
+		// Handle Content: some APIs prefer null over empty string when tool_calls is present
+		if m.Content == "" && m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			msg["content"] = nil
+		} else {
+			msg["content"] = m.Content
+		}
+
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			toolCalls := make([]map[string]interface{}, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				tcMap := map[string]interface{}{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				}
+				toolCalls = append(toolCalls, tcMap)
+			}
+			msg["tool_calls"] = toolCalls
+		}
+
+		if m.Role == "tool" {
+			msg["tool_call_id"] = m.ToolCallID
+		}
+
+		sanitized = append(sanitized, msg)
+	}
+	return sanitized
 }
 
 func parseResponse(body []byte) (*LLMResponse, error) {

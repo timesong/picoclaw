@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,17 +102,58 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		return fmt.Errorf("chat ID is empty")
 	}
 
-	payload, err := json.Marshal(map[string]string{"text": msg.Content})
-	if err != nil {
-		return fmt.Errorf("failed to marshal feishu content: %w", err)
+	// 1. Handle Media if present (currently only first image)
+	if len(msg.Media) > 0 {
+		for _, m := range msg.Media {
+			if strings.HasSuffix(strings.ToLower(m), ".jpg") ||
+				strings.HasSuffix(strings.ToLower(m), ".jpeg") ||
+				strings.HasSuffix(strings.ToLower(m), ".png") ||
+				strings.HasPrefix(m, "http") {
+				if err := c.sendImage(ctx, msg.ChatID, m); err != nil {
+					logger.ErrorCF("feishu", "Failed to send image", map[string]interface{}{"error": err.Error(), "path": m})
+				}
+			}
+		}
+	}
+
+	// 2. Handle Content type
+	msgType := larkim.MsgTypeText
+	content := ""
+
+	// Check if metadata specifies message type
+	if t, ok := msg.Metadata["msg_type"]; ok {
+		msgType = t
+		content = msg.Content
+	} else if strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
+		// Auto-detect interactive card or post
+		var js map[string]interface{}
+		if err := json.Unmarshal([]byte(msg.Content), &js); err == nil {
+			if _, isCard := js["card"]; isCard {
+				msgType = larkim.MsgTypeInteractive
+				content = msg.Content
+			} else if _, isPost := js["post"]; isPost {
+				msgType = larkim.MsgTypePost
+				content = msg.Content
+			}
+		}
+	}
+
+	if content == "" {
+		// Default to text
+		msgType = larkim.MsgTypeText
+		payload, err := json.Marshal(map[string]string{"text": msg.Content})
+		if err != nil {
+			return fmt.Errorf("failed to marshal feishu content: %w", err)
+		}
+		content = string(payload)
 	}
 
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(msg.ChatID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(payload)).
+			MsgType(msgType).
+			Content(content).
 			Uuid(fmt.Sprintf("picoclaw-%d", time.Now().UnixNano())).
 			Build()).
 		Build()
@@ -125,8 +168,68 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 	}
 
 	logger.DebugCF("feishu", "Feishu message sent", map[string]interface{}{
-		"chat_id": msg.ChatID,
+		"chat_id":  msg.ChatID,
+		"msg_type": msgType,
 	})
+
+	return nil
+}
+
+func (c *FeishuChannel) sendImage(ctx context.Context, chatID, path string) error {
+	localPath := path
+	if strings.HasPrefix(path, "http") {
+		localPath = utils.DownloadFileSimple(path, "feishu_upload")
+		if localPath == "" {
+			return fmt.Errorf("failed to download image from %s", path)
+		}
+		defer os.Remove(localPath)
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open image file: %w", err)
+	}
+	defer file.Close()
+
+	// 1. Upload image
+	req := larkim.NewCreateImageReqBuilder().
+		Body(larkim.NewCreateImageReqBodyBuilder().
+			ImageType(larkim.ImageTypeMessage).
+			Image(file).
+			Build()).
+		Build()
+
+	resp, err := c.client.Im.V1.Image.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to upload image to feishu: %w", err)
+	}
+
+	if !resp.Success() {
+		return fmt.Errorf("feishu image upload error: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+
+	imageKey := *resp.Data.ImageKey
+
+	// 2. Send image message
+	payload, _ := json.Marshal(map[string]string{"image_key": imageKey})
+	msgReq := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeImage).
+			Content(string(payload)).
+			Uuid(fmt.Sprintf("picoclaw-img-%d", time.Now().UnixNano())).
+			Build()).
+		Build()
+
+	msgResp, err := c.client.Im.V1.Message.Create(ctx, msgReq)
+	if err != nil {
+		return fmt.Errorf("failed to send feishu image message: %w", err)
+	}
+
+	if !msgResp.Success() {
+		return fmt.Errorf("feishu api error sending image: code=%d msg=%s", msgResp.Code, msgResp.Msg)
+	}
 
 	return nil
 }

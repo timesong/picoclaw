@@ -229,7 +229,7 @@ func (t *SubagentTool) Name() string {
 }
 
 func (t *SubagentTool) Description() string {
-	return "Execute a subagent task synchronously and return the result. Use this for delegating specific tasks to an independent agent instance. Returns execution summary to user and full details to LLM."
+	return "Execute a subagent task synchronously and return the result. Use this for delegating specific tasks to an independent agent instance. Returns execution summary to user and full details to LLM. IMPORTANT: DO NOT use this tool for scheduling, reminders, waiting or delaying tasks. For any time-based tasks or reminders, you MUST use the 'cron' tool instead."
 }
 
 func (t *SubagentTool) Parameters() map[string]interface{} {

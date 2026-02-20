@@ -566,18 +566,23 @@ func gatewayCmd() {
 	cronService := setupCronTool(agentLoop, msgBus, cfg.WorkspacePath(), cfg.Agents.Defaults.RestrictToWorkspace, execTimeout, cfg)
 
 	heartbeatService := heartbeat.NewHeartbeatService(
-		cfg.WorkspacePath(),
 		cfg.Heartbeat.Interval,
 		cfg.Heartbeat.Enabled,
 	)
 	heartbeatService.SetBus(msgBus)
-	heartbeatService.SetHandler(func(prompt, channel, chatID string) *tools.ToolResult {
+
+	// Dynamically register heartbeat targets for all agents
+	agentLoop.Registry().SetOnAgentRegistered(func(id, workspace string) {
+		heartbeatService.AddTarget(id, workspace)
+	})
+
+	heartbeatService.SetHandler(func(agentID, prompt, channel, chatID string) *tools.ToolResult {
 		// Use cli:direct as fallback if no valid channel
 		if channel == "" || chatID == "" {
 			channel, chatID = "cli", "direct"
 		}
 		// Use ProcessHeartbeat - no session history, each heartbeat is independent
-		response, err := agentLoop.ProcessHeartbeat(context.Background(), prompt, channel, chatID)
+		response, err := agentLoop.ProcessHeartbeat(context.Background(), agentID, prompt, channel, chatID)
 		if err != nil {
 			return tools.ErrorResult(fmt.Sprintf("Heartbeat error: %v", err))
 		}
