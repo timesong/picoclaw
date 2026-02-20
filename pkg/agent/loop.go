@@ -105,12 +105,8 @@ func registerSharedTools(cfg *config.Config, msgBus *bus.MessageBus, registry *A
 
 		// Message tool
 		messageTool := tools.NewMessageTool()
-		messageTool.SetSendCallback(func(channel, chatID, content string) error {
-			msgBus.PublishOutbound(bus.OutboundMessage{
-				Channel: channel,
-				ChatID:  chatID,
-				Content: content,
-			})
+		messageTool.SetSendCallback(func(msg bus.OutboundMessage) error {
+			msgBus.PublishOutbound(msg)
 			return nil
 		})
 		agent.Tools.Register(messageTool)

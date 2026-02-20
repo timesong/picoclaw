@@ -20,6 +20,12 @@ func (m *mockRegistryProvider) GetDefaultModel() string {
 }
 
 func testCfg(agents []config.AgentConfig) *config.Config {
+	// Ensure all test agents use temporary workspace to prevent creating directories in ~/.picoclaw/
+	for i := range agents {
+		if agents[i].Workspace == "" {
+			agents[i].Workspace = "/tmp/picoclaw-test-registry-" + agents[i].ID
+		}
+	}
 	return &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{

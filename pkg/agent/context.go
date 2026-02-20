@@ -173,7 +173,13 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
 	}
 
+	// Debug: Log history before sanitization
+	logger.DebugCF("agent", "BuildMessages: Original history length", map[string]interface{}{"count": len(history)})
+	
 	history = sanitizeHistoryForProvider(history)
+	
+	// Debug: Log history after sanitization
+	logger.DebugCF("agent", "BuildMessages: Sanitized history length", map[string]interface{}{"count": len(history)})
 
 	messages := make([]providers.Message, 0)
 	messages = append(messages, providers.Message{
@@ -190,8 +196,28 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		})
 	}
 
+	// Debug: Log messages before healing
+	logger.DebugCF("agent", "BuildMessages: Before HealProtocol", map[string]interface{}{"count": len(messages)})
+	for i, msg := range messages {
+		logger.DebugCF("agent", fmt.Sprintf("  [%d] %s", i, msg.Role), map[string]interface{}{
+			"has_tool_calls": len(msg.ToolCalls) > 0,
+			"tool_call_id":   msg.ToolCallID,
+		})
+	}
+
 	// 2. Protocol Fix: Use a robust healer to ensure the sequence is valid for any API
-	return cb.HealProtocol(messages)
+	healed := cb.HealProtocol(messages)
+	
+	// Debug: Log messages after healing
+	logger.DebugCF("agent", "BuildMessages: After HealProtocol", map[string]interface{}{"count": len(healed)})
+	for i, msg := range healed {
+		logger.DebugCF("agent", fmt.Sprintf("  [%d] %s", i, msg.Role), map[string]interface{}{
+			"has_tool_calls": len(msg.ToolCalls) > 0,
+			"tool_call_id":   msg.ToolCallID,
+		})
+	}
+	
+	return healed
 }
 
 // HealProtocol ensures the message sequence follows strict LLM API rules:
@@ -205,7 +231,7 @@ func (cb *ContextBuilder) HealProtocol(messages []providers.Message) []providers
 	}
 
 	healed := make([]providers.Message, 0, len(messages))
-	var lastAssistantWithTools *providers.Message
+	lastAssistantWithToolsIdx := -1 // Use index instead of pointer to avoid stale references
 	pendingToolIDs := make(map[string]bool)
 
 	for i := 0; i < len(messages); i++ {
@@ -225,36 +251,34 @@ func (cb *ContextBuilder) HealProtocol(messages []providers.Message) []providers
 		// Non-tool message encountered.
 		// If we had an assistant calling tools, and we reached a user/system message before all tools responded,
 		// we MUST clean up that assistant message's tool_calls to avoid 400 errors.
-		if len(pendingToolIDs) > 0 && lastAssistantWithTools != nil {
+		if len(pendingToolIDs) > 0 && lastAssistantWithToolsIdx >= 0 {
 			logger.WarnCF("agent", "HealProtocol: Breaking tool chain due to intervening message", map[string]interface{}{
 				"role":           m.Role,
 				"orphaned_count": len(pendingToolIDs),
 			})
-			lastAssistantWithTools.ToolCalls = nil
+			healed[lastAssistantWithToolsIdx].ToolCalls = nil
 			pendingToolIDs = make(map[string]bool)
+			lastAssistantWithToolsIdx = -1
 		}
 
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			lastAssistantWithTools = &m
 			for _, tc := range m.ToolCalls {
 				pendingToolIDs[tc.ID] = true
 			}
 			healed = append(healed, m)
-			// Small hack: if we modified the pointer m, we need to ensure the refreshed lastAssistantWithTools
-			// is the one in the 'healed' slice.
-			lastAssistantWithTools = &healed[len(healed)-1]
+			lastAssistantWithToolsIdx = len(healed) - 1
 		} else {
 			// Normal user/system message
 			healed = append(healed, m)
-			lastAssistantWithTools = nil
+			lastAssistantWithToolsIdx = -1
 		}
 	}
 
 	// Final check: if the last message is an assistant calling tools with no responses,
 	// and there are no more messages coming (EOF), we must strip tool_calls to allow the LLM to just "talk".
-	if len(pendingToolIDs) > 0 && lastAssistantWithTools != nil {
+	if len(pendingToolIDs) > 0 && lastAssistantWithToolsIdx >= 0 {
 		logger.WarnCF("agent", "HealProtocol: Stripping terminal tool calls with no responses", nil)
-		lastAssistantWithTools.ToolCalls = nil
+		healed[lastAssistantWithToolsIdx].ToolCalls = nil
 	}
 
 	// DeepScan Rule: First non-system message should not be 'tool'
@@ -271,31 +295,58 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 	}
 
 	sanitized := make([]providers.Message, 0, len(history))
-	for _, msg := range history {
+	pendingToolCallIDs := make(map[string]bool)
+	lastAssistantIdx := -1
+
+	for i, msg := range history {
 		switch msg.Role {
 		case "tool":
-			if len(sanitized) == 0 {
-				logger.DebugCF("agent", "Dropping orphaned leading tool message", map[string]interface{}{})
+			// A tool message must have a corresponding tool call from a previous assistant
+			if !pendingToolCallIDs[msg.ToolCallID] {
+				logger.DebugCF("agent", "sanitizeHistory: Dropping orphaned tool message", map[string]interface{}{
+					"index":        i,
+					"tool_call_id": msg.ToolCallID,
+				})
 				continue
 			}
-			last := sanitized[len(sanitized)-1]
-			if last.Role != "assistant" || len(last.ToolCalls) == 0 {
-				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]interface{}{})
-				continue
-			}
+			delete(pendingToolCallIDs, msg.ToolCallID)
 			sanitized = append(sanitized, msg)
 
 		case "assistant":
+			// If previous assistant had unfulfilled tool calls, we need to drop it
+			if len(pendingToolCallIDs) > 0 && lastAssistantIdx >= 0 {
+				logger.WarnCF("agent", "sanitizeHistory: Removing assistant with unfulfilled tool calls", map[string]interface{}{
+					"index":        lastAssistantIdx,
+					"orphaned_ids": len(pendingToolCallIDs),
+				})
+				// Remove the problematic assistant message
+				sanitized = removeMessageAt(sanitized, lastAssistantIdx)
+				pendingToolCallIDs = make(map[string]bool)
+				lastAssistantIdx = -1
+			}
+
 			if len(msg.ToolCalls) > 0 {
-				if len(sanitized) == 0 {
-					logger.DebugCF("agent", "Dropping assistant tool-call turn at history start", map[string]interface{}{})
-					continue
+				// Record this assistant's tool calls
+				for _, tc := range msg.ToolCalls {
+					pendingToolCallIDs[tc.ID] = true
 				}
-				prev := sanitized[len(sanitized)-1]
-				if prev.Role != "user" && prev.Role != "tool" {
-					logger.DebugCF("agent", "Dropping assistant tool-call turn with invalid predecessor", map[string]interface{}{"prev_role": prev.Role})
-					continue
-				}
+				sanitized = append(sanitized, msg)
+				lastAssistantIdx = len(sanitized) - 1
+			} else {
+				sanitized = append(sanitized, msg)
+				lastAssistantIdx = -1
+			}
+
+		case "user", "system":
+			// If we encounter a user/system message with pending tool calls, drop the assistant
+			if len(pendingToolCallIDs) > 0 && lastAssistantIdx >= 0 {
+				logger.WarnCF("agent", "sanitizeHistory: Removing assistant with unfulfilled tool calls before user message", map[string]interface{}{
+					"assistant_idx": lastAssistantIdx,
+					"orphaned_ids":  len(pendingToolCallIDs),
+				})
+				sanitized = removeMessageAt(sanitized, lastAssistantIdx)
+				pendingToolCallIDs = make(map[string]bool)
+				lastAssistantIdx = -1
 			}
 			sanitized = append(sanitized, msg)
 
@@ -304,7 +355,23 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 		}
 	}
 
+	// Final cleanup: if we end with unfulfilled tool calls, remove that assistant
+	if len(pendingToolCallIDs) > 0 && lastAssistantIdx >= 0 {
+		logger.WarnCF("agent", "sanitizeHistory: Removing final assistant with unfulfilled tool calls", map[string]interface{}{
+			"orphaned_ids": len(pendingToolCallIDs),
+		})
+		sanitized = removeMessageAt(sanitized, lastAssistantIdx)
+	}
+
 	return sanitized
+}
+
+// removeMessageAt removes the message at the given index from the slice
+func removeMessageAt(messages []providers.Message, index int) []providers.Message {
+	if index < 0 || index >= len(messages) {
+		return messages
+	}
+	return append(messages[:index], messages[index+1:]...)
 }
 
 func (cb *ContextBuilder) AddToolResult(messages []providers.Message, toolCallID, toolName, result string) []providers.Message {
