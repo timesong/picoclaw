@@ -70,7 +70,7 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 
 	go func() {
 		if err := wsClient.Start(runCtx); err != nil {
-			logger.ErrorCF("feishu", "Feishu websocket stopped with error", map[string]interface{}{
+			logger.ErrorCF("feishu", "Feishu websocket stopped with error", map[string]any{
 				"error": err.Error(),
 			})
 		}
@@ -167,7 +167,7 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		return fmt.Errorf("feishu api error: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 
-	logger.DebugCF("feishu", "Feishu message sent", map[string]interface{}{
+	logger.DebugCF("feishu", "Feishu message sent", map[string]any{
 		"chat_id":  msg.ChatID,
 		"msg_type": msgType,
 	})
@@ -300,7 +300,7 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		}
 	}
 
-	logger.InfoCF("feishu", "Feishu message received", map[string]interface{}{
+	logger.InfoCF("feishu", "Feishu message received", map[string]any{
 		"sender_id": senderID,
 		"chat_id":   chatID,
 		"preview":   utils.Truncate(content, 80),

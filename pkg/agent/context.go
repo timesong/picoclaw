@@ -80,7 +80,7 @@ Your workspace is at: %s
 
 2. **Be helpful and accurate** - When using tools, briefly explain what you're doing.
 
-3. **Memory** - When remembering something, write to %s/memory/MEMORY.md`,
+3. **Memory** - When interacting with me if something seems memorable, update %s/memory/MEMORY.md`,
 		now, runtime, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection, workspacePath)
 }
 
@@ -96,7 +96,9 @@ func (cb *ContextBuilder) buildToolsSection() string {
 
 	var sb strings.Builder
 	sb.WriteString("## Available Tools\n\n")
-	sb.WriteString("**CRITICAL**: You MUST use tools to perform actions. Do NOT pretend to execute commands or schedule tasks.\n\n")
+	sb.WriteString(
+		"**CRITICAL**: You MUST use tools to perform actions. Do NOT pretend to execute commands or schedule tasks.\n\n",
+	)
 	sb.WriteString("You have access to the following tools:\n\n")
 	for _, s := range summaries {
 		sb.WriteString(s)
@@ -146,15 +148,15 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 		"IDENTITY.md",
 	}
 
-	var result string
+	var sb strings.Builder
 	for _, filename := range bootstrapFiles {
 		filePath := filepath.Join(cb.workspace, filename)
 		if data, err := os.ReadFile(filePath); err == nil {
-			result += fmt.Sprintf("## %s\n\n%s\n\n", filename, string(data))
+			fmt.Fprintf(&sb, "## %s\n\n%s\n\n", filename, data)
 		}
 	}
 
-	return result
+	return sb.String()
 }
 
 func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary string, currentMessage string, media []string, channel, chatID, senderName string) []providers.Message {
@@ -168,6 +170,24 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		}
 		systemPrompt += sessionInfo
 	}
+
+	// Log system prompt summary for debugging (debug mode only)
+	logger.DebugCF("agent", "System prompt built",
+		map[string]any{
+			"total_chars":   len(systemPrompt),
+			"total_lines":   strings.Count(systemPrompt, "\n") + 1,
+			"section_count": strings.Count(systemPrompt, "\n\n---\n\n") + 1,
+		})
+
+	// Log preview of system prompt (avoid logging huge content)
+	preview := systemPrompt
+	if len(preview) > 500 {
+		preview = preview[:500] + "... (truncated)"
+	}
+	logger.DebugCF("agent", "System prompt preview",
+		map[string]any{
+			"preview": preview,
+		})
 
 	if summary != "" {
 		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
@@ -374,7 +394,10 @@ func removeMessageAt(messages []providers.Message, index int) []providers.Messag
 	return append(messages[:index], messages[index+1:]...)
 }
 
-func (cb *ContextBuilder) AddToolResult(messages []providers.Message, toolCallID, toolName, result string) []providers.Message {
+func (cb *ContextBuilder) AddToolResult(
+	messages []providers.Message,
+	toolCallID, toolName, result string,
+) []providers.Message {
 	messages = append(messages, providers.Message{
 		Role:       "tool",
 		Content:    result,
@@ -383,7 +406,11 @@ func (cb *ContextBuilder) AddToolResult(messages []providers.Message, toolCallID
 	return messages
 }
 
-func (cb *ContextBuilder) AddAssistantMessage(messages []providers.Message, content string, toolCalls []map[string]interface{}) []providers.Message {
+func (cb *ContextBuilder) AddAssistantMessage(
+	messages []providers.Message,
+	content string,
+	toolCalls []map[string]any,
+) []providers.Message {
 	msg := providers.Message{
 		Role:    "assistant",
 		Content: content,
@@ -413,13 +440,13 @@ func (cb *ContextBuilder) loadSkills() string {
 }
 
 // GetSkillsInfo returns information about loaded skills.
-func (cb *ContextBuilder) GetSkillsInfo() map[string]interface{} {
+func (cb *ContextBuilder) GetSkillsInfo() map[string]any {
 	allSkills := cb.skillsLoader.ListSkills()
 	skillNames := make([]string, 0, len(allSkills))
 	for _, s := range allSkills {
 		skillNames = append(skillNames, s.Name)
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"total":     len(allSkills),
 		"available": len(allSkills),
 		"names":     skillNames,

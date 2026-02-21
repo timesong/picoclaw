@@ -28,11 +28,11 @@ func (t *MessageTool) Description() string {
 	return "Send a message to user on a chat channel. Support rich content like images and interactive cards on platforms like Feishu."
 }
 
-func (t *MessageTool) Parameters() map[string]interface{} {
-	return map[string]interface{}{
+func (t *MessageTool) Parameters() map[string]any {
+	return map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"content": map[string]interface{}{
+		"properties": map[string]any{
+			"content": map[string]any{
 				"type":        "string",
 				"description": "The message text or JSON card content to send",
 			},
@@ -41,11 +41,11 @@ func (t *MessageTool) Parameters() map[string]interface{} {
 				"items":       map[string]interface{}{"type": "string"},
 				"description": "Optional: list of local file paths or URLs to images/files to attach",
 			},
-			"channel": map[string]interface{}{
+			"channel": map[string]any{
 				"type":        "string",
 				"description": "Optional: target channel (telegram, feishu, etc.)",
 			},
-			"chat_id": map[string]interface{}{
+			"chat_id": map[string]any{
 				"type":        "string",
 				"description": "Optional: target chat/user ID",
 			},
@@ -73,7 +73,7 @@ func (t *MessageTool) SetSendCallback(callback SendCallback) {
 	t.sendCallback = callback
 }
 
-func (t *MessageTool) Execute(ctx context.Context, args map[string]interface{}) *ToolResult {
+func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	content, ok := args["content"].(string)
 	if !ok {
 		return &ToolResult{ForLLM: "content is required", IsError: true}
