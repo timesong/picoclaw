@@ -2,9 +2,13 @@ package anthropicprovider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -120,9 +124,37 @@ func buildParams(
 					anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
 				)
 			} else {
-				anthropicMessages = append(anthropicMessages,
-					anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)),
-				)
+				// Build content blocks (text + images)
+				var blocks []anthropic.ContentBlockParamUnion
+				
+				// Add text block if content is not empty
+				if msg.Content != "" {
+					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+				}
+				
+				// Add image blocks if images are provided
+				if len(msg.Images) > 0 {
+					log.Printf("Anthropic: Processing %d images for user message", len(msg.Images))
+				}
+				for _, imagePath := range msg.Images {
+					log.Printf("Anthropic: Loading image from %s", imagePath)
+					if imageBlock := loadImageForAnthropic(imagePath); imageBlock != nil {
+						blocks = append(blocks, *imageBlock)
+						log.Printf("Anthropic: Image loaded successfully")
+					} else {
+						log.Printf("Anthropic: Failed to load image from %s", imagePath)
+					}
+				}
+				
+				// If we have blocks, add the message
+				if len(blocks) > 0 {
+					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(blocks...))
+				} else {
+					// Fallback: add empty text block
+					anthropicMessages = append(anthropicMessages,
+						anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)),
+					)
+				}
 			}
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
@@ -259,4 +291,60 @@ func normalizeBaseURL(apiBase string) string {
 	}
 
 	return base
+}
+
+// loadImageForAnthropic reads an image file and创建 an Anthropic image block.
+// Returns nil if the image cannot be loaded or is not supported.
+func loadImageForAnthropic(imagePath string) *anthropic.ContentBlockParamUnion {
+	// Read the image file
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		log.Printf("Failed to read image file %s: %v", imagePath, err)
+		return nil
+	}
+
+	// Detect media type from file extension or content
+	mediaType := detectMediaType(imagePath, data)
+	if mediaType == "" {
+		log.Printf("Unsupported image type for %s", imagePath)
+		return nil
+	}
+
+	// Encode to base64
+	base64Data := base64.StdEncoding.EncodeToString(data)
+
+	// Create image block using NewImageBlockBase64
+	imageBlock := anthropic.NewImageBlockBase64(mediaType, base64Data)
+	return &imageBlock
+}
+
+// detectMediaType returns the media type (MIME type) for an image.
+func detectMediaType(path string, data []byte) string {
+	// First try by file extension
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	}
+
+	// Fallback: detect by content
+	contentType := http.DetectContentType(data)
+	switch contentType {
+	case "image/jpeg":
+		return "image/jpeg"
+	case "image/png":
+		return "image/png"
+	case "image/gif":
+		return "image/gif"
+	case "image/webp":
+		return "image/webp"
+	}
+
+	return ""
 }

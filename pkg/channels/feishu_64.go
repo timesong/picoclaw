@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -257,6 +259,37 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		content = "[empty message]"
 	}
 
+	// Handle image messages
+	mediaPaths := []string{}
+	// Note: Downloaded images are kept in temp directory for LLM processing.
+	// They will be cleaned up by OS temp directory management or can be
+	// cleaned up later by a background task.
+
+	if message.MessageType != nil && *message.MessageType == larkim.MsgTypeImage {
+		var imagePayload struct {
+			ImageKey string `json:"image_key"`
+		}
+		if message.Content != nil && json.Unmarshal([]byte(*message.Content), &imagePayload) == nil {
+			if imagePayload.ImageKey != "" {
+				// Use message_id to download image, not image_key
+				messageID := stringValue(message.MessageId)
+				imagePath := c.downloadImage(ctx, messageID, imagePayload.ImageKey)
+				if imagePath != "" {
+					mediaPaths = append(mediaPaths, imagePath)
+					if content != "" {
+						content += "\n"
+					}
+					content += "[image]"
+					logger.DebugCF("feishu", "Image downloaded", map[string]any{
+						"message_id": messageID,
+						"image_key":  imagePayload.ImageKey,
+						"path":       imagePath,
+					})
+				}
+			}
+		}
+	}
+
 	metadata := map[string]string{}
 	if messageID := stringValue(message.MessageId); messageID != "" {
 		metadata["message_id"] = messageID
@@ -301,13 +334,89 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 	}
 
 	logger.InfoCF("feishu", "Feishu message received", map[string]any{
-		"sender_id": senderID,
-		"chat_id":   chatID,
-		"preview":   utils.Truncate(content, 80),
+		"sender_id":  senderID,
+		"chat_id":    chatID,
+		"preview":    utils.Truncate(content, 80),
+		"has_media":  len(mediaPaths) > 0,
+		"media_count": len(mediaPaths),
 	})
 
-	c.HandleMessage(senderID, chatID, content, nil, metadata)
+	c.HandleMessage(senderID, chatID, content, mediaPaths, metadata)
 	return nil
+}
+
+// downloadImage downloads an image from Feishu using message_id and file_key
+func (c *FeishuChannel) downloadImage(ctx context.Context, messageID, fileKey string) string {
+	if messageID == "" || fileKey == "" {
+		return ""
+	}
+
+	// Get image using Message Resource API with message_id and file_key
+	req := larkim.NewGetMessageResourceReqBuilder().
+		MessageId(messageID).
+		FileKey(fileKey).
+		Type("image").
+		Build()
+
+	resp, err := c.client.Im.V1.MessageResource.Get(ctx, req)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to get image", map[string]any{
+			"error":      err.Error(),
+			"message_id": messageID,
+			"file_key":   fileKey,
+		})
+		return ""
+	}
+
+	if !resp.Success() {
+		logger.ErrorCF("feishu", "Feishu API error getting image", map[string]any{
+			"code":       resp.Code,
+			"msg":        resp.Msg,
+			"message_id": messageID,
+			"file_key":   fileKey,
+		})
+		return ""
+	}
+
+	// Create temp directory if not exists
+	mediaDir := filepath.Join(os.TempDir(), "picoclaw_media")
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
+		logger.ErrorCF("feishu", "Failed to create media directory", map[string]any{
+			"error": err.Error(),
+		})
+		return ""
+	}
+
+	// Create temp file in media directory
+	tempFile, err := os.CreateTemp(mediaDir, "feishu_image_*.jpg")
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to create temp file", map[string]any{
+			"error": err.Error(),
+		})
+		return ""
+	}
+	tempPath := tempFile.Name()
+
+	// Write image data directly from response
+	if resp.File != nil {
+		if _, err := io.Copy(tempFile, resp.File); err != nil {
+			logger.ErrorCF("feishu", "Failed to write image file", map[string]any{
+				"error": err.Error(),
+			})
+			tempFile.Close()
+			os.Remove(tempPath)
+			return ""
+		}
+	}
+	tempFile.Close()
+
+	logger.InfoCF("feishu", "Image downloaded successfully", map[string]any{
+		"message_id": messageID,
+		"file_key":   fileKey,
+		"path":       tempPath,
+	})
+
+	return tempPath
 }
 
 func extractFeishuSenderID(sender *larkim.EventSender) string {
@@ -368,12 +477,19 @@ func extractFeishuMessageContent(message *larkim.EventMessage) string {
 		return ""
 	}
 
-	if message.MessageType != nil && *message.MessageType == larkim.MsgTypeText {
-		var textPayload struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal([]byte(*message.Content), &textPayload); err == nil {
-			return textPayload.Text
+	if message.MessageType != nil {
+		switch *message.MessageType {
+		case larkim.MsgTypeText:
+			var textPayload struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(*message.Content), &textPayload); err == nil {
+				return textPayload.Text
+			}
+		case larkim.MsgTypeImage:
+			// Image messages will be handled separately in handleMessageReceive
+			// Return empty to avoid confusion
+			return ""
 		}
 	}
 

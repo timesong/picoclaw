@@ -212,8 +212,7 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 	if strings.TrimSpace(currentMessage) != "" {
 		messages = append(messages, providers.Message{
 			Role:    "user",
-			Content: currentMessage,
-		})
+			Content: currentMessage,			Images:  media,		})
 	}
 
 	// Debug: Log messages before healing

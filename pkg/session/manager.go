@@ -60,9 +60,15 @@ func (sm *SessionManager) GetOrCreate(key string) *Session {
 }
 
 func (sm *SessionManager) AddMessage(sessionKey, role, content string) {
+	sm.AddMessageWithImages(sessionKey, role, content, nil)
+}
+
+// AddMessageWithImages adds a message with optional images to the session.
+func (sm *SessionManager) AddMessageWithImages(sessionKey, role, content string, images []string) {
 	sm.AddFullMessage(sessionKey, providers.Message{
 		Role:    role,
 		Content: content,
+		Images:  images,
 	})
 }
 

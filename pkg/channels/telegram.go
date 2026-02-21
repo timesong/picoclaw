@@ -221,19 +221,9 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	content := ""
 	mediaPaths := []string{}
-	localFiles := []string{} // 跟踪需要清理的本地文件
-
-	// 确保临时文件在函数返回时被清理
-	defer func() {
-		for _, file := range localFiles {
-			if err := os.Remove(file); err != nil {
-				logger.DebugCF("telegram", "Failed to cleanup temp file", map[string]any{
-					"file":  file,
-					"error": err.Error(),
-				})
-			}
-		}
-	}()
+	// Note: Downloaded media files are kept in temp directory for LLM processing.
+	// They will be cleaned up by OS temp directory management or can be
+	// cleaned up later by a background task.
 
 	if message.Text != "" {
 		content += message.Text
@@ -250,7 +240,6 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		photo := message.Photo[len(message.Photo)-1]
 		photoPath := c.downloadPhoto(ctx, photo.FileID)
 		if photoPath != "" {
-			localFiles = append(localFiles, photoPath)
 			mediaPaths = append(mediaPaths, photoPath)
 			if content != "" {
 				content += "\n"
@@ -262,7 +251,6 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Voice != nil {
 		voicePath := c.downloadFile(ctx, message.Voice.FileID, ".ogg")
 		if voicePath != "" {
-			localFiles = append(localFiles, voicePath)
 			mediaPaths = append(mediaPaths, voicePath)
 
 			transcribedText := ""
@@ -297,7 +285,6 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Audio != nil {
 		audioPath := c.downloadFile(ctx, message.Audio.FileID, ".mp3")
 		if audioPath != "" {
-			localFiles = append(localFiles, audioPath)
 			mediaPaths = append(mediaPaths, audioPath)
 			if content != "" {
 				content += "\n"
@@ -309,7 +296,6 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Document != nil {
 		docPath := c.downloadFile(ctx, message.Document.FileID, "")
 		if docPath != "" {
-			localFiles = append(localFiles, docPath)
 			mediaPaths = append(mediaPaths, docPath)
 			if content != "" {
 				content += "\n"

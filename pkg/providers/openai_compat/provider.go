@@ -3,12 +3,15 @@ package openai_compat
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -153,11 +156,39 @@ func (p *Provider) sanitizeMessages(messages []Message) []map[string]interface{}
 			"role": m.Role,
 		}
 
-		// Handle Content: some APIs prefer null over empty string when tool_calls is present
-		if m.Content == "" && m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			msg["content"] = nil
+		// Handle images for user messages (multimodal content)
+		if m.Role == "user" && len(m.Images) > 0 {
+			log.Printf("OpenAI-compat: Processing %d images for user message", len(m.Images))
+			contentParts := []map[string]interface{}{}
+			
+			// Add text part if content is not empty
+			if m.Content != "" {
+				contentParts = append(contentParts, map[string]interface{}{
+					"type": "text",
+					"text": m.Content,
+				})
+			}
+			
+			// Add image parts
+			for _, imagePath := range m.Images {
+				if imageURL := convertImageToDataURL(imagePath); imageURL != "" {
+					contentParts = append(contentParts, map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": imageURL,
+						},
+					})
+				}
+			}
+			
+			msg["content"] = contentParts
 		} else {
-			msg["content"] = m.Content
+			// Handle Content: some APIs prefer null over empty string when tool_calls is present
+			if m.Content == "" && m.Role == "assistant" && len(m.ToolCalls) > 0 {
+				msg["content"] = nil
+			} else {
+				msg["content"] = m.Content
+			}
 		}
 
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
@@ -316,4 +347,52 @@ func asFloat(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// convertImageToDataURL reads an image file and converts it to a data URL.
+// Returns empty string if the image cannot be loaded.
+func convertImageToDataURL(imagePath string) string {
+	// Read the image file
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		log.Printf("Failed to read image file %s: %v", imagePath, err)
+		return ""
+	}
+
+	// Detect media type
+	mediaType := detectImageMediaType(imagePath, data)
+	if mediaType == "" {
+		log.Printf("Unsupported image type for %s", imagePath)
+		return ""
+	}
+
+	// Encode to base64
+	base64Data := base64.StdEncoding.EncodeToString(data)
+
+	// Create data URL
+	return fmt.Sprintf("data:%s;base64,%s", mediaType, base64Data)
+}
+
+// detectImageMediaType returns the MIME type for an image.
+func detectImageMediaType(path string, data []byte) string {
+	// First try by file extension
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	}
+
+	// Fallback: detect by content
+	contentType := http.DetectContentType(data)
+	if strings.HasPrefix(contentType, "image/") {
+		return contentType
+	}
+
+	return ""
 }

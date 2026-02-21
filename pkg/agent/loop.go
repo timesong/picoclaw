@@ -42,15 +42,16 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	UserMessage     string // User message content (may include prefix)
-	DefaultResponse string // Response when LLM returns empty
-	SenderName      string // Nickname of the sender
-	EnableSummary   bool   // Whether to trigger summarization
-	SendResponse    bool   // Whether to send response via bus
-	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	SessionKey      string   // Session identifier for history/context
+	Channel         string   // Target channel for tool execution
+	ChatID          string   // Target chat ID for tool execution
+	UserMessage     string   // User message content (may include prefix)
+	UserImages      []string // User message images (file paths or URLs)
+	DefaultResponse string   // Response when LLM returns empty
+	SenderName      string   // Nickname of the sender
+	EnableSummary   bool     // Whether to trigger summarization
+	SendResponse    bool     // Whether to send response via bus
+	NoHistory       bool     // If true, don't load session history (for heartbeat)
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
@@ -287,6 +288,8 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"chat_id":     msg.ChatID,
 			"sender_id":   msg.SenderID,
 			"session_key": msg.SessionKey,
+			"has_media":   len(msg.Media) > 0,
+			"media_count": len(msg.Media),
 		})
 
 	// Route system messages to processSystemMessage
@@ -335,6 +338,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		ChatID:          msg.ChatID,
 		SenderName:      senderName,
 		UserMessage:     msg.Content,
+		UserImages:      msg.Media,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
@@ -424,14 +428,14 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		history,
 		summary,
 		opts.UserMessage,
-		nil,
+		opts.UserImages,
 		opts.Channel,
 		opts.ChatID,
 		opts.SenderName,
 	)
 
-	// 3. Save user message to session
-	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
+	// 3. Save user message to session (with images if provided)
+	agent.Sessions.AddMessageWithImages(opts.SessionKey, "user", opts.UserMessage, opts.UserImages)
 
 	// 4. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)

@@ -42,6 +42,7 @@ type Message struct {
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Images     []string   `json:"images,omitempty"` // Local file paths or URLs for images
 }
 
 type ToolDefinition struct {
