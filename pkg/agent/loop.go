@@ -53,7 +53,7 @@ type processOptions struct {
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
-	registry := NewAgentRegistry(cfg, provider)
+	registry := NewAgentRegistry(cfg, msgBus, provider)
 
 	// Register shared tools to all agents
 	registerSharedTools(cfg, msgBus, registry, provider)
