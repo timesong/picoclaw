@@ -115,15 +115,10 @@ func registerSharedTools(
 		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms
 		agent.Tools.Register(tools.NewI2CTool())
 		agent.Tools.Register(tools.NewSPITool())
-
 		// Message tool
 		messageTool := tools.NewMessageTool()
-		messageTool.SetSendCallback(func(channel, chatID, content string) error {
-			msgBus.PublishOutbound(bus.OutboundMessage{
-				Channel: channel,
-				ChatID:  chatID,
-				Content: content,
-			})
+		messageTool.SetSendCallback(func(msg bus.OutboundMessage) error {
+			msgBus.PublishOutbound(msg)
 			return nil
 		})
 		agent.Tools.Register(messageTool)

@@ -60,6 +60,7 @@ type Message struct {
 	SystemParts      []ContentBlock `json:"system_parts,omitempty"` // structured system blocks for cache-aware adapters
 	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	Images           []string       `json:"images,omitempty"` // Local file paths or URLs for images
 }
 
 type ToolDefinition struct {

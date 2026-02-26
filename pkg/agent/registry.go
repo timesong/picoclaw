@@ -198,14 +198,10 @@ func (r *AgentRegistry) registerToolsToAgent(agent *AgentInstance) {
 		return r.CanSpawnSubagent(currentAgentID, targetAgentID)
 	})
 	agent.Tools.Register(spawnTool)
-
 	// Register any dynamically added global tools
 	for _, t := range r.globalTools {
 		agent.Tools.Register(t)
 	}
-
-	// Update context builder with the complete tools registry
-	agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 }
 
 // initializeTenantWorkspace copies bootstrap files and skills from the default workspace to the new tenant workspace.
