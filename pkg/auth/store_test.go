@@ -3,9 +3,29 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+// setTempHome sets a temporary home directory for testing that works on both Unix and Windows
+func setTempHome(t *testing.T, tmpDir string) func() {
+	t.Helper()
+	var origHome string
+	var cleanup func()
+	
+	if runtime.GOOS == "windows" {
+		origHome = os.Getenv("USERPROFILE")
+		t.Setenv("USERPROFILE", tmpDir)
+		cleanup = func() { os.Setenv("USERPROFILE", origHome) }
+	} else {
+		origHome = os.Getenv("HOME")
+		t.Setenv("HOME", tmpDir)
+		cleanup = func() { os.Setenv("HOME", origHome) }
+	}
+	
+	return cleanup
+}
 
 func TestAuthCredentialIsExpired(t *testing.T) {
 	tests := []struct {
@@ -52,9 +72,8 @@ func TestAuthCredentialNeedsRefresh(t *testing.T) {
 
 func TestStoreRoundtrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	cleanup := setTempHome(t, tmpDir)
+	defer cleanup()
 
 	cred := &AuthCredential{
 		AccessToken:  "test-access-token",
@@ -89,9 +108,8 @@ func TestStoreRoundtrip(t *testing.T) {
 
 func TestStoreFilePermissions(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	cleanup := setTempHome(t, tmpDir)
+	defer cleanup()
 
 	cred := &AuthCredential{
 		AccessToken: "secret-token",
@@ -107,17 +125,20 @@ func TestStoreFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() error: %v", err)
 	}
-	perm := info.Mode().Perm()
-	if perm != 0o600 {
-		t.Errorf("file permissions = %o, want 0600", perm)
+	
+	// Skip permission check on Windows (different permission model)
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm != 0o600 {
+			t.Errorf("file permissions = %o, want 0600", perm)
+		}
 	}
 }
 
 func TestStoreMultiProvider(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	cleanup := setTempHome(t, tmpDir)
+	defer cleanup()
 
 	openaiCred := &AuthCredential{AccessToken: "openai-token", Provider: "openai", AuthMethod: "oauth"}
 	anthropicCred := &AuthCredential{AccessToken: "anthropic-token", Provider: "anthropic", AuthMethod: "token"}
@@ -148,9 +169,8 @@ func TestStoreMultiProvider(t *testing.T) {
 
 func TestDeleteCredential(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	cleanup := setTempHome(t, tmpDir)
+	defer cleanup()
 
 	cred := &AuthCredential{AccessToken: "to-delete", Provider: "openai", AuthMethod: "oauth"}
 	if err := SetCredential("openai", cred); err != nil {
@@ -172,9 +192,8 @@ func TestDeleteCredential(t *testing.T) {
 
 func TestLoadStoreEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	cleanup := setTempHome(t, tmpDir)
+	defer cleanup()
 
 	store, err := LoadStore()
 	if err != nil {

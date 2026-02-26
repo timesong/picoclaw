@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -400,6 +401,12 @@ func TestCodexCliProvider_GetDefaultModel(t *testing.T) {
 
 func createMockCodexCLI(t *testing.T, events []string) string {
 	t.Helper()
+	
+	// Skip on Windows as bash scripts are not supported
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "codex")
 
@@ -471,6 +478,11 @@ func TestCodexCliProvider_MockCLI_Error(t *testing.T) {
 }
 
 func TestCodexCliProvider_MockCLI_WithModel(t *testing.T) {
+	// Skip on Windows as bash scripts are not supported
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	
 	// Mock script that captures args to verify model flag is passed
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "codex")
@@ -517,6 +529,11 @@ echo '{"type":"turn.completed"}'`
 }
 
 func TestCodexCliProvider_MockCLI_ContextCancel(t *testing.T) {
+	// Skip on Windows as bash scripts are not supported
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	
 	// Script that sleeps forever
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "codex")
