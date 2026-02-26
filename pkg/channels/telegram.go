@@ -208,7 +208,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		senderID = fmt.Sprintf("%d|%s", user.ID, user.Username)
 	}
 
-	// 检查白名单，避免为被拒绝的用户下载附件
+	// check allowlist to avoid downloading attachments for rejected users
 	if !c.IsAllowed(senderID) {
 		logger.DebugCF("telegram", "Message rejected by allowlist", map[string]any{
 			"user_id": senderID,
@@ -221,9 +221,19 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	content := ""
 	mediaPaths := []string{}
-	// Note: Downloaded media files are kept in temp directory for LLM processing.
-	// They will be cleaned up by OS temp directory management or can be
-	// cleaned up later by a background task.
+	localFiles := []string{} // track local files that need cleanup
+
+	// ensure temp files are cleaned up when function returns
+	defer func() {
+		for _, file := range localFiles {
+			if err := os.Remove(file); err != nil {
+				logger.DebugCF("telegram", "Failed to cleanup temp file", map[string]any{
+					"file":  file,
+					"error": err.Error(),
+				})
+			}
+		}
+	}()
 
 	if message.Text != "" {
 		content += message.Text
@@ -240,6 +250,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		photo := message.Photo[len(message.Photo)-1]
 		photoPath := c.downloadPhoto(ctx, photo.FileID)
 		if photoPath != "" {
+			localFiles = append(localFiles, photoPath)
 			mediaPaths = append(mediaPaths, photoPath)
 			if content != "" {
 				content += "\n"
@@ -251,9 +262,10 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Voice != nil {
 		voicePath := c.downloadFile(ctx, message.Voice.FileID, ".ogg")
 		if voicePath != "" {
+			localFiles = append(localFiles, voicePath)
 			mediaPaths = append(mediaPaths, voicePath)
 
-			transcribedText := ""
+			var transcribedText string
 			if c.transcriber != nil && c.transcriber.IsAvailable() {
 				transcriberCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
@@ -285,6 +297,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Audio != nil {
 		audioPath := c.downloadFile(ctx, message.Audio.FileID, ".mp3")
 		if audioPath != "" {
+			localFiles = append(localFiles, audioPath)
 			mediaPaths = append(mediaPaths, audioPath)
 			if content != "" {
 				content += "\n"
@@ -296,6 +309,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	if message.Document != nil {
 		docPath := c.downloadFile(ctx, message.Document.FileID, "")
 		if docPath != "" {
+			localFiles = append(localFiles, docPath)
 			mediaPaths = append(mediaPaths, docPath)
 			if content != "" {
 				content += "\n"

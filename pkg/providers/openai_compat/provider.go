@@ -3,15 +3,12 @@ package openai_compat
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,7 +40,7 @@ func NewProvider(apiKey, apiBase, proxy string) *Provider {
 
 func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string) *Provider {
 	client := &http.Client{
-		Timeout: 300 * time.Second,
+		Timeout: 120 * time.Second,
 	}
 
 	if proxy != "" {
@@ -80,7 +77,7 @@ func (p *Provider) Chat(
 
 	requestBody := map[string]any{
 		"model":    model,
-		"messages": p.sanitizeMessages(messages),
+		"messages": stripSystemParts(messages),
 	}
 
 	if len(tools) > 0 {
@@ -111,6 +108,18 @@ func (p *Provider) Chat(
 			requestBody["temperature"] = 1.0
 		} else {
 			requestBody["temperature"] = temperature
+		}
+	}
+
+	// Prompt caching: pass a stable cache key so OpenAI can bucket requests
+	// with the same key and reuse prefix KV cache across calls.
+	// The key is typically the agent ID — stable per agent, shared across requests.
+	// See: https://platform.openai.com/docs/guides/prompt-caching
+	// Prompt caching is only supported by OpenAI-native endpoints.
+	// Gemini and other providers reject unknown fields, so skip for non-OpenAI APIs.
+	if cacheKey, ok := options["prompt_cache_key"].(string); ok && cacheKey != "" {
+		if !strings.Contains(p.apiBase, "generativelanguage.googleapis.com") {
+			requestBody["prompt_cache_key"] = cacheKey
 		}
 	}
 
@@ -147,81 +156,13 @@ func (p *Provider) Chat(
 	return parseResponse(body)
 }
 
-// sanitizeMessages converts internal Message objects to a format strictly compatible with OpenAI API.
-// Specifically it ensures tool_calls have only id, type, and function fields.
-func (p *Provider) sanitizeMessages(messages []Message) []map[string]interface{} {
-	sanitized := make([]map[string]interface{}, 0, len(messages))
-	for _, m := range messages {
-		msg := map[string]interface{}{
-			"role": m.Role,
-		}
-
-		// Handle images for user messages (multimodal content)
-		if m.Role == "user" && len(m.Images) > 0 {
-			log.Printf("OpenAI-compat: Processing %d images for user message", len(m.Images))
-			contentParts := []map[string]interface{}{}
-			
-			// Add text part if content is not empty
-			if m.Content != "" {
-				contentParts = append(contentParts, map[string]interface{}{
-					"type": "text",
-					"text": m.Content,
-				})
-			}
-			
-			// Add image parts
-			for _, imagePath := range m.Images {
-				if imageURL := convertImageToDataURL(imagePath); imageURL != "" {
-					contentParts = append(contentParts, map[string]interface{}{
-						"type": "image_url",
-						"image_url": map[string]interface{}{
-							"url": imageURL,
-						},
-					})
-				}
-			}
-			
-			msg["content"] = contentParts
-		} else {
-			// Handle Content: some APIs prefer null over empty string when tool_calls is present
-			if m.Content == "" && m.Role == "assistant" && len(m.ToolCalls) > 0 {
-				msg["content"] = nil
-			} else {
-				msg["content"] = m.Content
-			}
-		}
-
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			toolCalls := make([]map[string]interface{}, 0, len(m.ToolCalls))
-			for _, tc := range m.ToolCalls {
-				tcMap := map[string]interface{}{
-					"id":   tc.ID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-					},
-				}
-				toolCalls = append(toolCalls, tcMap)
-			}
-			msg["tool_calls"] = toolCalls
-		}
-
-		if m.Role == "tool" {
-			msg["tool_call_id"] = m.ToolCallID
-		}
-
-		sanitized = append(sanitized, msg)
-	}
-	return sanitized
-}
-
 func parseResponse(body []byte) (*LLMResponse, error) {
 	var apiResponse struct {
 		Choices []struct {
 			Message struct {
-				Content   string `json:"content"`
-				ToolCalls []struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
 					Function *struct {
@@ -293,11 +234,38 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 	}
 
 	return &LLMResponse{
-		Content:      choice.Message.Content,
-		ToolCalls:    toolCalls,
-		FinishReason: choice.FinishReason,
-		Usage:        apiResponse.Usage,
+		Content:          choice.Message.Content,
+		ReasoningContent: choice.Message.ReasoningContent,
+		ToolCalls:        toolCalls,
+		FinishReason:     choice.FinishReason,
+		Usage:            apiResponse.Usage,
 	}, nil
+}
+
+// openaiMessage is the wire-format message for OpenAI-compatible APIs.
+// It mirrors protocoltypes.Message but omits SystemParts, which is an
+// internal field that would be unknown to third-party endpoints.
+type openaiMessage struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// stripSystemParts converts []Message to []openaiMessage, dropping the
+// SystemParts field so it doesn't leak into the JSON payload sent to
+// OpenAI-compatible APIs (some strict endpoints reject unknown fields).
+func stripSystemParts(messages []Message) []openaiMessage {
+	out := make([]openaiMessage, len(messages))
+	for i, m := range messages {
+		out[i] = openaiMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return out
 }
 
 func normalizeModel(model, apiBase string) string {
@@ -312,7 +280,7 @@ func normalizeModel(model, apiBase string) string {
 
 	prefix := strings.ToLower(model[:idx])
 	switch prefix {
-	case "moonshot", "nvidia", "groq", "ollama", "deepseek", "google", "openrouter", "zhipu":
+	case "moonshot", "nvidia", "groq", "ollama", "deepseek", "google", "openrouter", "zhipu", "mistral":
 		return model[idx+1:]
 	default:
 		return model
@@ -347,52 +315,4 @@ func asFloat(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
-}
-
-// convertImageToDataURL reads an image file and converts it to a data URL.
-// Returns empty string if the image cannot be loaded.
-func convertImageToDataURL(imagePath string) string {
-	// Read the image file
-	data, err := os.ReadFile(imagePath)
-	if err != nil {
-		log.Printf("Failed to read image file %s: %v", imagePath, err)
-		return ""
-	}
-
-	// Detect media type
-	mediaType := detectImageMediaType(imagePath, data)
-	if mediaType == "" {
-		log.Printf("Unsupported image type for %s", imagePath)
-		return ""
-	}
-
-	// Encode to base64
-	base64Data := base64.StdEncoding.EncodeToString(data)
-
-	// Create data URL
-	return fmt.Sprintf("data:%s;base64,%s", mediaType, base64Data)
-}
-
-// detectImageMediaType returns the MIME type for an image.
-func detectImageMediaType(path string, data []byte) string {
-	// First try by file extension
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	}
-
-	// Fallback: detect by content
-	contentType := http.DetectContentType(data)
-	if strings.HasPrefix(contentType, "image/") {
-		return contentType
-	}
-
-	return ""
 }

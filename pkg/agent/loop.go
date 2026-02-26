@@ -42,20 +42,21 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string   // Session identifier for history/context
-	Channel         string   // Target channel for tool execution
-	ChatID          string   // Target chat ID for tool execution
-	UserMessage     string   // User message content (may include prefix)
-	UserImages      []string // User message images (file paths or URLs)
-	DefaultResponse string   // Response when LLM returns empty
-	SenderName      string   // Nickname of the sender
-	EnableSummary   bool     // Whether to trigger summarization
-	SendResponse    bool     // Whether to send response via bus
-	NoHistory       bool     // If true, don't load session history (for heartbeat)
+	SessionKey      string // Session identifier for history/context
+	Channel         string // Target channel for tool execution
+	ChatID          string // Target chat ID for tool execution
+	UserMessage     string // User message content (may include prefix)
+	DefaultResponse string // Response when LLM returns empty
+	EnableSummary   bool   // Whether to trigger summarization
+	SendResponse    bool   // Whether to send response via bus
+	NoHistory       bool   // If true, don't load session history (for heartbeat)
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
-	registry := NewAgentRegistry(cfg, msgBus, provider)
+	registry := NewAgentRegistry(cfg, provider)
+
+	// Register shared tools to all agents
+	registerSharedTools(cfg, msgBus, registry, provider)
 
 	// Set up shared fallback chain
 	cooldown := providers.NewCooldownTracker()
@@ -96,15 +97,20 @@ func registerSharedTools(
 			BraveAPIKey:          cfg.Tools.Web.Brave.APIKey,
 			BraveMaxResults:      cfg.Tools.Web.Brave.MaxResults,
 			BraveEnabled:         cfg.Tools.Web.Brave.Enabled,
+			TavilyAPIKey:         cfg.Tools.Web.Tavily.APIKey,
+			TavilyBaseURL:        cfg.Tools.Web.Tavily.BaseURL,
+			TavilyMaxResults:     cfg.Tools.Web.Tavily.MaxResults,
+			TavilyEnabled:        cfg.Tools.Web.Tavily.Enabled,
 			DuckDuckGoMaxResults: cfg.Tools.Web.DuckDuckGo.MaxResults,
 			DuckDuckGoEnabled:    cfg.Tools.Web.DuckDuckGo.Enabled,
 			PerplexityAPIKey:     cfg.Tools.Web.Perplexity.APIKey,
 			PerplexityMaxResults: cfg.Tools.Web.Perplexity.MaxResults,
 			PerplexityEnabled:    cfg.Tools.Web.Perplexity.Enabled,
+			Proxy:                cfg.Tools.Web.Proxy,
 		}); searchTool != nil {
 			agent.Tools.Register(searchTool)
 		}
-		agent.Tools.Register(tools.NewWebFetchTool(50000))
+		agent.Tools.Register(tools.NewWebFetchToolWithProxy(50000, cfg.Tools.Web.Proxy))
 
 		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms
 		agent.Tools.Register(tools.NewI2CTool())
@@ -112,8 +118,12 @@ func registerSharedTools(
 
 		// Message tool
 		messageTool := tools.NewMessageTool()
-		messageTool.SetSendCallback(func(msg bus.OutboundMessage) error {
-			msgBus.PublishOutbound(msg)
+		messageTool.SetSendCallback(func(channel, chatID, content string) error {
+			msgBus.PublishOutbound(bus.OutboundMessage{
+				Channel: channel,
+				ChatID:  chatID,
+				Content: content,
+			})
 			return nil
 		})
 		agent.Tools.Register(messageTool)
@@ -139,9 +149,6 @@ func registerSharedTools(
 			return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 		})
 		agent.Tools.Register(spawnTool)
-
-		// Update context builder with the complete tools registry
-		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
 }
 
@@ -196,15 +203,15 @@ func (al *AgentLoop) Stop() {
 }
 
 func (al *AgentLoop) RegisterTool(tool tools.Tool) {
-	al.registry.RegisterGlobalTool(tool)
+	for _, agentID := range al.registry.ListAgentIDs() {
+		if agent, ok := al.registry.GetAgent(agentID); ok {
+			agent.Tools.Register(tool)
+		}
+	}
 }
 
 func (al *AgentLoop) SetChannelManager(cm *channels.Manager) {
 	al.channelManager = cm
-}
-
-func (al *AgentLoop) Registry() *AgentRegistry {
-	return al.registry
 }
 
 // RecordLastChannel records the last active channel for this workspace.
@@ -244,25 +251,11 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	return al.processMessage(ctx, msg)
 }
 
-// ProcessHeartbeat processes a heartbeat request for a specific agent without session history.
+// ProcessHeartbeat processes a heartbeat request without session history.
 // Each heartbeat is independent and doesn't accumulate context.
-func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, agentID, content, channel, chatID string) (string, error) {
-	var targetAgent *AgentInstance
-	if agentID != "" {
-		if a, ok := al.registry.GetAgent(agentID); ok {
-			targetAgent = a
-		}
-	}
-
-	if targetAgent == nil {
-		targetAgent = al.registry.GetDefaultAgent()
-	}
-
-	if targetAgent == nil {
-		return "", fmt.Errorf("no agent available for heartbeat")
-	}
-
-	return al.runAgentLoop(ctx, targetAgent, processOptions{
+func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, content, channel, chatID string) (string, error) {
+	agent := al.registry.GetDefaultAgent()
+	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      "heartbeat",
 		Channel:         channel,
 		ChatID:          chatID,
@@ -288,8 +281,6 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"chat_id":     msg.ChatID,
 			"sender_id":   msg.SenderID,
 			"session_key": msg.SessionKey,
-			"has_media":   len(msg.Media) > 0,
-			"media_count": len(msg.Media),
 		})
 
 	// Route system messages to processSystemMessage
@@ -330,15 +321,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"matched_by":  route.MatchedBy,
 		})
 
-	senderName := msg.Metadata["sender_name"]
-
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
-		SenderName:      senderName,
 		UserMessage:     msg.Content,
-		UserImages:      msg.Media,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
@@ -428,14 +415,13 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		history,
 		summary,
 		opts.UserMessage,
-		opts.UserImages,
+		nil,
 		opts.Channel,
 		opts.ChatID,
-		opts.SenderName,
 	)
 
-	// 3. Save user message to session (with images if provided)
-	agent.Sessions.AddMessageWithImages(opts.SessionKey, "user", opts.UserMessage, opts.UserImages)
+	// 3. Save user message to session
+	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
 	// 4. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
@@ -535,8 +521,9 @@ func (al *AgentLoop) runLLMIteration(
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
-							"max_tokens":  agent.MaxTokens,
-							"temperature": agent.Temperature,
+							"max_tokens":       agent.MaxTokens,
+							"temperature":      agent.Temperature,
+							"prompt_cache_key": agent.ID,
 						})
 					},
 				)
@@ -551,8 +538,9 @@ func (al *AgentLoop) runLLMIteration(
 				return fbResult.Response, nil
 			}
 			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
-				"max_tokens":  agent.MaxTokens,
-				"temperature": agent.Temperature,
+				"max_tokens":       agent.MaxTokens,
+				"temperature":      agent.Temperature,
+				"prompt_cache_key": agent.ID,
 			})
 		}
 
@@ -565,15 +553,10 @@ func (al *AgentLoop) runLLMIteration(
 			}
 
 			errMsg := strings.ToLower(err.Error())
-			// Refined context error check: avoid false positives from latency timeouts ("context deadline exceeded")
-			isContextError := (strings.Contains(errMsg, "token") ||
+			isContextError := strings.Contains(errMsg, "token") ||
 				strings.Contains(errMsg, "context") ||
-				strings.Contains(errMsg, "max_tokens") ||
 				strings.Contains(errMsg, "invalidparameter") ||
-				strings.Contains(errMsg, "length")) &&
-				!strings.Contains(errMsg, "deadline") &&
-				!strings.Contains(errMsg, "cancel") &&
-				!strings.Contains(errMsg, "timeout")
+				strings.Contains(errMsg, "length")
 
 			if isContextError && retry < maxRetries {
 				logger.WarnCF("agent", "Context window error detected, attempting compression", map[string]any{
@@ -594,7 +577,7 @@ func (al *AgentLoop) runLLMIteration(
 				newSummary := agent.Sessions.GetSummary(opts.SessionKey)
 				messages = agent.ContextBuilder.BuildMessages(
 					newHistory, newSummary, "",
-					nil, opts.Channel, opts.ChatID, opts.SenderName,
+					nil, opts.Channel, opts.ChatID,
 				)
 				continue
 			}
@@ -643,8 +626,9 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Build assistant message with tool calls
 		assistantMsg := providers.Message{
-			Role:    "assistant",
-			Content: response.Content,
+			Role:             "assistant",
+			Content:          response.Content,
+			ReasoningContent: response.ReasoningContent,
 		}
 		for _, tc := range normalizedToolCalls {
 			argumentsJSON, _ := json.Marshal(tc.Arguments)
@@ -744,20 +728,6 @@ func (al *AgentLoop) runLLMIteration(
 	return finalContent, iteration, nil
 }
 
-// findSafeCutoff ensures we don't break assistant(tool_calls)/tool message pairs.
-// It moves the cutoff index backwards until it doesn't start with a 'tool' message.
-func findSafeCutoff(messages []providers.Message, index int) int {
-	if index <= 0 || index >= len(messages) {
-		return index
-	}
-	// If the message at index is 'tool', it MUST follow its assistant caller.
-	// We move back until we reach the assistant message or the beginning.
-	for index > 0 && messages[index].Role == "tool" {
-		index--
-	}
-	return index
-}
-
 // updateToolContexts updates the context for tools that need channel/chatID info.
 func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID string) {
 	// Use ContextualTool interface instead of type assertions
@@ -784,18 +754,12 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 	tokenEstimate := al.estimateTokens(newHistory)
 	threshold := agent.ContextWindow * 75 / 100
 
-	// Increase history threshold from 20 to 100 to avoid too frequent summarization
-	if len(newHistory) > 100 || tokenEstimate > threshold {
+	if len(newHistory) > 20 || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
 				defer al.summarizing.Delete(summarizeKey)
-				// Log locally but don't notify user in chat to avoid noise
-				logger.InfoCF("agent", "Memory threshold reached, optimizing history in background", map[string]interface{}{
-					"session":     sessionKey,
-					"history_len": len(newHistory),
-					"tokens":      tokenEstimate,
-				})
+				logger.Debug("Memory threshold reached. Optimizing conversation history...")
 				al.summarizeSession(agent, sessionKey)
 			}()
 		}
@@ -827,12 +791,9 @@ func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
 	// 3. Last message
 
 	droppedCount := mid
-	// Ensure we don't break tool response pairs
-	cutoff := findSafeCutoff(conversation, mid)
-	keptConversation := conversation[cutoff:]
-	droppedCount = cutoff
+	keptConversation := conversation[mid:]
 
-	newHistory := make([]providers.Message, 0)
+	newHistory := make([]providers.Message, 0, 1+len(keptConversation)+1)
 
 	// Append compression note to the original system prompt instead of adding a new system message
 	// This avoids having two consecutive system messages which some APIs (like Zhipu) reject
@@ -939,20 +900,18 @@ func formatToolsForLog(toolDefs []providers.ToolDefinition) string {
 
 // summarizeSession summarizes the conversation history for a session.
 func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	history := agent.Sessions.GetHistory(sessionKey)
 	summary := agent.Sessions.GetSummary(sessionKey)
 
-	// Keep last messages for continuity, but ensure we don't break tool pairs
-	desiredKeep := 4
-	if len(history) < desiredKeep+1 {
+	// Keep last 4 messages for continuity
+	if len(history) <= 4 {
 		return
 	}
-	cutoff := findSafeCutoff(history, len(history)-desiredKeep)
-	toSummarize := history[:cutoff]
-	keepCount := len(history) - cutoff
+
+	toSummarize := history[:len(history)-4]
 
 	// Oversized Message Guard
 	maxMessageTokens := agent.ContextWindow / 2
@@ -996,8 +955,9 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 			nil,
 			agent.Model,
 			map[string]any{
-				"max_tokens":  1024,
-				"temperature": 0.3,
+				"max_tokens":       1024,
+				"temperature":      0.3,
+				"prompt_cache_key": agent.ID,
 			},
 		)
 		if err == nil {
@@ -1015,7 +975,7 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
-		agent.Sessions.TruncateHistory(sessionKey, keepCount)
+		agent.Sessions.TruncateHistory(sessionKey, 4)
 		agent.Sessions.Save(sessionKey)
 	}
 }
@@ -1046,8 +1006,9 @@ func (al *AgentLoop) summarizeBatch(
 		nil,
 		agent.Model,
 		map[string]any{
-			"max_tokens":  2048, // Increase max tokens for summary
-			"temperature": 0.3,
+			"max_tokens":       1024,
+			"temperature":      0.3,
+			"prompt_cache_key": agent.ID,
 		},
 	)
 	if err != nil {
