@@ -1,12 +1,29 @@
-{
-  "agents": {
+{  "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
       "restrict_to_workspace": true,
       "model_name": "gpt4",
       "max_tokens": 8192,
       "temperature": 0.7,
-      "max_tool_iterations": 20
+      "max_tool_iterations": 20,
+      "auto_register": {
+        "enabled": false,
+        "pattern": "user-{channel}-{peer_id}",
+        "workspace_template": "~/.picoclaw/tenants/{agent_id}",
+        "inherit_from_default": true,
+        "copy_files": [
+          "SOUL.md",
+          "USER.md",
+          "IDENTITY.md",
+          "AGENT.md"
+        ],
+        "copy_skills": true,
+        "ttl_seconds": 0,
+        "exclude_channels": [
+          "cli",
+          "system"
+        ]
+      }
     }
   },
   "model_list": [

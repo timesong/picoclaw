@@ -143,6 +143,39 @@ type SubagentsConfig struct {
 	Model       *AgentModelConfig `json:"model,omitempty"`
 }
 
+// AutoRegisterConfig controls dynamic agent auto-registration behavior
+type AutoRegisterConfig struct {
+	// Enabled enables auto-registration of agents for direct messages
+	Enabled bool `json:"enabled"`
+	
+	// Pattern defines the agent ID generation pattern with variable substitution:
+	// - {channel}: message source channel name (e.g., telegram, feishu)
+	// - {peer_id}: user/conversation ID
+	// - {account_id}: account ID (for multi-account scenarios)
+	// Example: "user-{channel}-{peer_id}" or "tenant-{peer_id}"
+	Pattern string `json:"pattern,omitempty"`
+	
+	// WorkspaceTemplate defines the workspace path template with variable:
+	// - {agent_id}: generated agent ID
+	// Example: "~/.picoclaw/tenants/{agent_id}"
+	WorkspaceTemplate string `json:"workspace_template,omitempty"`
+	
+	// InheritFromDefault whether to inherit files from default workspace
+	InheritFromDefault bool `json:"inherit_from_default,omitempty"`
+	
+	// CopyFiles list of files to copy from default workspace
+	CopyFiles []string `json:"copy_files,omitempty"`
+	
+	// CopySkills whether to copy skills directory
+	CopySkills bool `json:"copy_skills,omitempty"`
+	
+	// TTLSeconds agent expiration time in seconds, 0 means never expire
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	
+	// ExcludeChannels list of channels to exclude from auto-registration
+	ExcludeChannels []string `json:"exclude_channels,omitempty"`
+}
+
 type PeerMatch struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
@@ -178,6 +211,9 @@ type AgentDefaults struct {
 	MaxTokens           int      `json:"max_tokens"                      env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
 	Temperature         *float64 `json:"temperature,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
 	MaxToolIterations   int      `json:"max_tool_iterations"             env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	
+	// AutoRegister configures dynamic agent auto-registration for multi-tenant scenarios
+	AutoRegister *AutoRegisterConfig `json:"auto_register,omitempty"`
 }
 
 // GetModelName returns the effective model name for the agent defaults.
@@ -187,6 +223,27 @@ func (d *AgentDefaults) GetModelName() string {
 		return d.ModelName
 	}
 	return d.Model
+}
+
+// IsAutoRegisterEnabled checks if auto-registration is enabled
+func (d *AgentDefaults) IsAutoRegisterEnabled() bool {
+	return d.AutoRegister != nil && d.AutoRegister.Enabled
+}
+
+// GetAutoRegisterPattern returns the auto-register pattern, with default fallback
+func (d *AgentDefaults) GetAutoRegisterPattern() string {
+	if d.AutoRegister == nil || d.AutoRegister.Pattern == "" {
+		return "user-{channel}-{peer_id}"
+	}
+	return d.AutoRegister.Pattern
+}
+
+// GetAutoRegisterWorkspaceTemplate returns the workspace template, with default fallback
+func (d *AgentDefaults) GetAutoRegisterWorkspaceTemplate() string {
+	if d.AutoRegister == nil || d.AutoRegister.WorkspaceTemplate == "" {
+		return "~/.picoclaw/tenants/{agent_id}"
+	}
+	return d.AutoRegister.WorkspaceTemplate
 }
 
 type ChannelsConfig struct {
@@ -676,7 +733,7 @@ func (c *Config) HasProvidersConfig() bool {
 		v.GitHubCopilot.APIKey != "" || v.GitHubCopilot.APIBase != "" ||
 		v.Antigravity.APIKey != "" || v.Antigravity.APIBase != "" ||
 		v.Qwen.APIKey != "" || v.Qwen.APIBase != "" ||
-		v.Mistral.APIKey != "" || v.Mistral.APIBase != ""
+		v.Mistral.APIKey != "" || v.Mistral.APIBase != "" 
 }
 
 // ValidateModelList validates all ModelConfig entries in the model_list.

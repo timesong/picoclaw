@@ -108,13 +108,17 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 	if match := r.findAccountMatch(bindings); match != nil {
 		return choose(match.AgentID, "binding.account")
 	}
-
 	// Priority 6: Channel wildcard binding
 	if match := r.findChannelWildcardMatch(bindings); match != nil {
 		return choose(match.AgentID, "binding.channel")
 	}
 
-	// Priority 7: Default agent
+	// Priority 7: Auto-register (if enabled)
+	if agentID := r.tryAutoRegister(input); agentID != "" {
+		return choose(agentID, "auto.register")
+	}
+
+	// Priority 8: Default agent
 	return choose(r.resolveDefaultAgentID(), "default")
 }
 
@@ -133,15 +137,14 @@ func (r *RouteResolver) filterBindings(channel, accountID string) []config.Agent
 	return filtered
 }
 
-func matchesAccountID(matchAccountID, actual string) bool {
-	trimmed := strings.TrimSpace(matchAccountID)
+func matchesAccountID(matchAccountID, actual string) bool {	trimmed := strings.TrimSpace(matchAccountID)
 	if trimmed == "" {
 		return actual == DefaultAccountID
 	}
 	if trimmed == "*" {
 		return true
 	}
-	return strings.ToLower(trimmed) == strings.ToLower(actual)
+	return strings.EqualFold(trimmed, actual)
 }
 
 func (r *RouteResolver) findPeerMatch(bindings []config.AgentBinding, peer *RoutePeer) *config.AgentBinding {
@@ -249,4 +252,54 @@ func (r *RouteResolver) resolveDefaultAgentID() string {
 		return NormalizeAgentID(id)
 	}
 	return DefaultAgentID
+}
+
+// tryAutoRegister attempts to generate an auto-register agent ID based on config
+func (r *RouteResolver) tryAutoRegister(input RouteInput) string {
+	cfg := r.cfg.Agents.Defaults.AutoRegister
+	
+	// Check if auto-register is enabled
+	if cfg == nil || !cfg.Enabled {
+		return ""
+	}
+	
+	peer := input.Peer
+	
+	// Only apply to direct messages
+	if peer == nil || peer.Kind != "direct" {
+		return ""
+	}
+	
+	channel := strings.ToLower(strings.TrimSpace(input.Channel))
+	
+	// Exclude system channels
+	if channel == "cli" || channel == "system" {
+		return ""
+	}
+	
+	// Check exclude list
+	if cfg.ExcludeChannels != nil {
+		for _, excluded := range cfg.ExcludeChannels {
+			if strings.EqualFold(excluded, channel) {
+				return ""
+			}
+		}
+	}
+	
+	// Build agent ID using pattern
+	pattern := cfg.Pattern
+	if pattern == "" {
+		pattern = "user-{channel}-{peer_id}"
+	}
+	
+	peerID := strings.ToLower(strings.TrimSpace(peer.ID))
+	accountID := NormalizeAccountID(input.AccountID)
+	
+	agentID := strings.NewReplacer(
+		"{channel}", channel,
+		"{peer_id}", peerID,
+		"{account_id}", accountID,
+	).Replace(pattern)
+	
+	return NormalizeAgentID(agentID)
 }
