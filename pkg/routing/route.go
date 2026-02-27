@@ -263,7 +263,6 @@ func (r *RouteResolver) tryAutoRegister(input RouteInput) string {
 	if cfg == nil || !cfg.Enabled {
 		return ""
 	}
-
 	peer := input.Peer
 
 	// Only apply to direct messages
@@ -273,12 +272,7 @@ func (r *RouteResolver) tryAutoRegister(input RouteInput) string {
 
 	channel := strings.ToLower(strings.TrimSpace(input.Channel))
 
-	// Exclude system channels
-	if channel == "cli" || channel == "system" {
-		return ""
-	}
-
-	// Check exclude list
+	// Check exclude list (controlled by configuration)
 	if cfg.ExcludeChannels != nil {
 		for _, excluded := range cfg.ExcludeChannels {
 			if strings.EqualFold(excluded, channel) {

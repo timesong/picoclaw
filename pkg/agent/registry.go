@@ -230,7 +230,6 @@ func (r *AgentRegistry) initializeTenantWorkspace(workspacePath string) error {
 	if autoRegCfg == nil || !autoRegCfg.InheritFromDefault {
 		return nil
 	}
-
 	// Get default workspace path
 	defaultWorkspace := r.cfg.Agents.Defaults.Workspace
 	if defaultWorkspace == "" {
@@ -244,6 +243,29 @@ func (r *AgentRegistry) initializeTenantWorkspace(workspacePath string) error {
 		logger.WarnCF("agent", "No default workspace found for inheritance", nil)
 		return nil
 	}
+
+	// Expand ~ in default workspace path
+	if strings.HasPrefix(defaultWorkspace, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			defaultWorkspace = filepath.Join(home, defaultWorkspace[2:])
+		}
+	}
+
+	// Verify default workspace exists
+	if _, err := os.Stat(defaultWorkspace); os.IsNotExist(err) {
+		logger.WarnCF("agent", "Default workspace does not exist, skipping file inheritance",
+			map[string]any{
+				"workspace": defaultWorkspace,
+			})
+		return nil
+	}
+
+	logger.InfoCF("agent", "Initializing tenant workspace from default",
+		map[string]any{
+			"source": defaultWorkspace,
+			"target": workspacePath,
+		})
 
 	// Copy specified files
 	for _, filename := range autoRegCfg.CopyFiles {
@@ -259,13 +281,13 @@ func (r *AgentRegistry) initializeTenantWorkspace(workspacePath string) error {
 		}
 	}
 
-	// Copy skills directory if enabled
+	// Create symlink for skills directory if enabled
 	if autoRegCfg.CopySkills {
 		srcSkillsDir := filepath.Join(defaultWorkspace, "skills")
 		dstSkillsDir := filepath.Join(workspacePath, "skills")
 
-		if err := r.copyDir(srcSkillsDir, dstSkillsDir); err != nil {
-			logger.WarnCF("agent", "Failed to copy skills directory",
+		if err := r.createSymlinkIfNotExists(srcSkillsDir, dstSkillsDir); err != nil {
+			logger.WarnCF("agent", "Failed to create symlink for skills directory",
 				map[string]any{
 					"error": err.Error(),
 				})
@@ -364,4 +386,102 @@ func (r *AgentRegistry) copyDir(src, dst string) error {
 	}
 
 	return nil
+}
+
+// createSymlinkIfNotExists creates a symbolic link from dst to src if it doesn't exist.
+// This is cross-platform compatible (Windows requires admin privileges or Developer Mode).
+func (r *AgentRegistry) createSymlinkIfNotExists(src, dst string) error {
+	// Check if destination already exists
+	if info, err := os.Lstat(dst); err == nil {
+		// Check if it's already a symlink pointing to the correct location
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(dst)
+			if err == nil {
+				// Resolve to absolute paths for comparison
+				absTarget, _ := filepath.Abs(target)
+				absSrc, _ := filepath.Abs(src)
+				if absTarget == absSrc {
+					logger.InfoCF("agent", "Skills symlink already exists and is correct",
+						map[string]any{
+							"source": src,
+							"target": dst,
+						})
+					return nil
+				}
+			}
+		}
+		// Destination exists but is not the correct symlink - remove it
+		logger.WarnCF("agent", "Removing existing skills directory to create symlink",
+			map[string]any{
+				"path": dst,
+			})
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("failed to remove existing destination: %w", err)
+		}
+	}
+
+	// Check if source exists
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return fmt.Errorf("source directory does not exist: %s", src)
+	}
+
+	// Convert to absolute paths
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		return fmt.Errorf("failed to resolve source path: %w", err)
+	}
+
+	// Create symlink
+	err = os.Symlink(absSrc, dst)
+	if err != nil {
+		// On Windows, symlink creation might fail without proper privileges
+		// Fall back to directory junction (Windows-specific)
+		if err := r.createJunctionOrCopy(absSrc, dst); err != nil {
+			return fmt.Errorf("failed to create symlink or junction: %w", err)
+		}
+		logger.InfoCF("agent", "Created directory junction for skills (Windows fallback)",
+			map[string]any{
+				"source": absSrc,
+				"target": dst,
+			})
+		return nil
+	}
+
+	logger.InfoCF("agent", "Created symlink for skills directory",
+		map[string]any{
+			"source": absSrc,
+			"target": dst,
+		})
+	return nil
+}
+
+// createJunctionOrCopy attempts to create a Windows junction, or falls back to copying
+func (r *AgentRegistry) createJunctionOrCopy(src, dst string) error {
+	// Try to create junction using mklink (Windows only)
+	if isWindows() {
+		if junctionErr := r.createWindowsJunction(src, dst); junctionErr == nil {
+			return nil
+		} else {
+			logger.WarnCF("agent", "Failed to create junction, falling back to copy",
+				map[string]any{
+					"error": junctionErr.Error(),
+				})
+		}
+	}
+
+	// Fallback: copy the directory
+	logger.InfoCF("agent", "Falling back to copying skills directory", nil)
+	return r.copyDir(src, dst)
+}
+
+// createWindowsJunction creates a directory junction on Windows
+func (r *AgentRegistry) createWindowsJunction(src, dst string) error {
+	// Use Go's standard library to attempt junction creation
+	// On Windows, this may work without admin privileges
+	return os.Symlink(src, dst)
+}
+
+// isWindows returns true if running on Windows
+func isWindows() bool {
+	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
 }

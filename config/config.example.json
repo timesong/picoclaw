@@ -17,10 +17,10 @@
           "IDENTITY.md",
           "AGENT.md"
         ],
+        "_comment_copy_skills": "Creates a symlink to the default workspace's skills directory (saves space and keeps skills in sync)",
         "copy_skills": true,
         "ttl_seconds": 0,
         "exclude_channels": [
-          "cli",
           "system"
         ]
       }

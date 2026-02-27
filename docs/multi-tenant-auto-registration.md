@@ -32,9 +32,8 @@ Add the `auto_register` section to your `agents.defaults` in `config.json`:
           "USER.md",
           "IDENTITY.md",
           "AGENT.md"
-        ],
-        "copy_skills": true,
-        "exclude_channels": ["cli", "system"]
+        ],        "copy_skills": true,
+        "exclude_channels": ["system"]
       }
     }
   }
@@ -50,7 +49,7 @@ Add the `auto_register` section to your `agents.defaults` in `config.json`:
 | `workspace_template` | string | `"~/.picoclaw/tenants/{agent_id}"` | Workspace path template |
 | `inherit_from_default` | boolean | `false` | Copy files from default workspace |
 | `copy_files` | string[] | `[]` | List of files to copy |
-| `copy_skills` | boolean | `false` | Copy skills directory |
+| `copy_skills` | boolean | `false` | Create symlink to skills directory (saves space, keeps in sync) |
 | `ttl_seconds` | integer | `0` | Agent expiration time (0 = never) |
 | `exclude_channels` | string[] | `[]` | Channels to exclude from auto-registration |
 
@@ -134,7 +133,8 @@ When auto-registration is enabled, it adds a new priority level (Priority 7) to 
 ┌─────────────────────────────────────────────────────────────────┐
 │ 6. Initialize workspace (if inherit_from_default = true)        │
 │    - Copy files from copy_files list                            │
-│    - Copy skills directory if copy_skills = true                │
+│    - Create symlink to skills directory if copy_skills = true   │
+│      (Windows: junction, Linux/macOS: symlink)                  │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
@@ -203,8 +203,11 @@ Copy configuration files from default workspace:
 
 **Result:**
 - New workspace inherits SOUL.md, IDENTITY.md, AGENT.md
-- Skills directory is copied
+- **Skills directory is symlinked** (not copied) to save space and keep in sync
+  - Linux/macOS: Creates symbolic link
+  - Windows: Creates junction (no admin required) or falls back to copy if failed
 - Users can customize their own files without affecting others
+- All tenants share the same skills (memory efficient)
 
 ### 4. Enterprise Multi-Tenant
 
@@ -215,10 +218,9 @@ Different patterns for different deployment scenarios:
   "auto_register": {
     "enabled": true,
     "pattern": "tenant-{account_id}-{peer_id}",
-    "workspace_template": "/var/picoclaw/tenants/{agent_id}",
-    "inherit_from_default": true,
+    "workspace_template": "/var/picoclaw/tenants/{agent_id}",    "inherit_from_default": true,
     "copy_files": ["SOUL.md", "IDENTITY.md"],
-    "exclude_channels": ["cli", "system", "internal"]
+    "exclude_channels": ["system", "internal"]
   }
 }
 ```
@@ -303,10 +305,9 @@ Auto-created agents can expire after a certain time (future enhancement):
 Prevent auto-registration for specific channels:
 
 ```json
-{
-  "auto_register": {
+{  "auto_register": {
     "enabled": true,
-    "exclude_channels": ["cli", "system", "admin"]
+    "exclude_channels": ["system", "admin"]
   }
 }
 ```

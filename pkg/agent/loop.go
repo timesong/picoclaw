@@ -240,12 +240,24 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
+	// Extract peer ID from session key (format: "channel:peer_id" or "cli:peer_id")
+	var peerID string
+	if parts := strings.Split(sessionKey, ":"); len(parts) >= 2 {
+		peerID = parts[1]
+	} else {
+		peerID = sessionKey // Fallback to full session key as peer ID
+	}
+
 	msg := bus.InboundMessage{
 		Channel:    channel,
-		SenderID:   "cron",
+		SenderID:   peerID,
 		ChatID:     chatID,
 		Content:    content,
 		SessionKey: sessionKey,
+		Metadata: map[string]string{
+			"peer_kind": "direct",
+			"peer_id":   peerID,
+		},
 	}
 
 	return al.processMessage(ctx, msg)
