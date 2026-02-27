@@ -26,11 +26,23 @@ func (m *mockRegistryProvider) GetDefaultModel() string {
 	return "mock-model"
 }
 
+// testCfg creates a test configuration with optional workspace path.
+// If workspace is empty, it will use a safe default that won't create files.
 func testCfg(agents []config.AgentConfig) *config.Config {
+	return testCfgWithWorkspace(agents, "")
+}
+
+// testCfgWithWorkspace creates a test configuration with a specific workspace path.
+// Use t.TempDir() for workspace when you need to test file operations.
+func testCfgWithWorkspace(agents []config.AgentConfig, workspace string) *config.Config {
+	if workspace == "" {
+		// Use a non-existent path that won't accidentally create files
+		workspace = filepath.Join(os.TempDir(), "picoclaw-test-no-create")
+	}
 	return &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace:         "/tmp/picoclaw-test-registry",
+				Workspace:         workspace,
 				Model:             "gpt-4",
 				MaxTokens:         8192,
 				MaxToolIterations: 10,
@@ -397,5 +409,68 @@ func TestAgentRegistry_InitializeTenantWorkspace_WithInheritance(t *testing.T) {
 	copiedFile := filepath.Join(workspacePath, "SOUL.md")
 	if _, err := os.Stat(copiedFile); os.IsNotExist(err) {
 		t.Error("expected SOUL.md to be copied to tenant workspace")
+	}
+}
+
+// TestAgentRegistry_HasAgent verifies that HasAgent checks existence without triggering auto-registration
+func TestAgentRegistry_HasAgent(t *testing.T) {
+	cfg := testCfg([]config.AgentConfig{
+		{ID: "existing", Default: true},
+	})
+	cfg.Agents.Defaults.AutoRegister = &config.AutoRegisterConfig{
+		Enabled: true,
+		Pattern: "user-{channel}-{peer_id}",
+	}
+	registry := NewAgentRegistry(cfg, &mockRegistryProvider{})
+
+	// Test 1: Existing agent should return true
+	if !registry.HasAgent("existing") {
+		t.Error("HasAgent should return true for existing agent")
+	}
+
+	// Test 2: Non-existing agent should return false WITHOUT triggering auto-registration
+	autoAgentID := "user-cli-testuser"
+	if registry.HasAgent(autoAgentID) {
+		t.Error("HasAgent should return false for non-existing agent")
+	}
+
+	// Verify that the agent was NOT auto-registered
+	ids := registry.ListAgentIDs()
+	if len(ids) != 1 {
+		t.Errorf("Expected only 1 agent (no auto-registration), got %d: %v", len(ids), ids)
+	}
+
+	// Test 3: GetAgent SHOULD trigger auto-registration for comparison
+	agent, ok := registry.GetAgent(autoAgentID)
+	if !ok || agent == nil {
+		t.Error("GetAgent should auto-register agent")
+	}
+
+	// Now HasAgent should return true
+	if !registry.HasAgent(autoAgentID) {
+		t.Error("HasAgent should return true after agent was auto-registered")
+	}
+
+	// Verify agent count increased
+	ids = registry.ListAgentIDs()
+	if len(ids) != 2 {
+		t.Errorf("Expected 2 agents after auto-registration, got %d: %v", len(ids), ids)
+	}
+}
+
+// TestAgentRegistry_HasAgent_Normalization verifies that HasAgent normalizes agent IDs
+func TestAgentRegistry_HasAgent_Normalization(t *testing.T) {
+	cfg := testCfg([]config.AgentConfig{
+		{ID: "my-agent", Default: true},
+	})
+	registry := NewAgentRegistry(cfg, &mockRegistryProvider{})
+
+	// Test with different case - should still find the agent
+	if !registry.HasAgent("My-Agent") {
+		t.Error("HasAgent should normalize agent ID and find 'my-agent'")
+	}
+
+	if !registry.HasAgent("MY-AGENT") {
+		t.Error("HasAgent should normalize agent ID and find 'my-agent'")
 	}
 }

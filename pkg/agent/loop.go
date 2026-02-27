@@ -242,10 +242,26 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 ) (string, error) {
 	// Extract peer ID from session key (format: "channel:peer_id" or "cli:peer_id")
 	var peerID string
+	var peerKind string
+
 	if parts := strings.Split(sessionKey, ":"); len(parts) >= 2 {
 		peerID = parts[1]
 	} else {
 		peerID = sessionKey // Fallback to full session key as peer ID
+	}
+
+	// Check if this is a system session (cron, heartbeat, agent-scoped)
+	// These should NOT trigger auto-registration
+	isSystemSession := strings.HasPrefix(sessionKey, "cron-") ||
+		strings.HasPrefix(sessionKey, "heartbeat") ||
+		strings.HasPrefix(sessionKey, "agent:")
+
+	if isSystemSession {
+		// For system sessions, don't set peer metadata (won't trigger auto-register)
+		peerKind = ""
+	} else {
+		// For regular sessions, mark as direct message
+		peerKind = "direct"
 	}
 
 	msg := bus.InboundMessage{
@@ -254,10 +270,13 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 		ChatID:     chatID,
 		Content:    content,
 		SessionKey: sessionKey,
-		Metadata: map[string]string{
-			"peer_kind": "direct",
-			"peer_id":   peerID,
-		},
+		Metadata:   make(map[string]string),
+	}
+
+	// Only set peer metadata for non-system sessions
+	if peerKind != "" {
+		msg.Metadata["peer_kind"] = peerKind
+		msg.Metadata["peer_id"] = peerID
 	}
 
 	return al.processMessage(ctx, msg)

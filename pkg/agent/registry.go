@@ -85,6 +85,18 @@ func (r *AgentRegistry) GetAgent(agentID string) (*AgentInstance, bool) {
 	return nil, false
 }
 
+// HasAgent checks if an agent exists without triggering auto-registration.
+// This method is useful when you want to verify agent existence without side effects,
+// such as in validation logic, conditional checks, or status queries.
+// Use GetAgent() instead if you want to trigger auto-registration when enabled.
+func (r *AgentRegistry) HasAgent(agentID string) bool {
+	id := routing.NormalizeAgentID(agentID)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.agents[id]
+	return ok
+}
+
 // ResolveRoute determines which agent handles the message.
 func (r *AgentRegistry) ResolveRoute(input routing.RouteInput) routing.ResolvedRoute {
 	return r.resolver.ResolveRoute(input)
