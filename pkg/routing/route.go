@@ -49,11 +49,17 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 		dmScope = DMScopeMain
 	}
 	identityLinks := r.cfg.Session.IdentityLinks
-
 	bindings := r.filterBindings(channel, accountID)
 
 	choose := func(agentID string, matchedBy string) ResolvedRoute {
-		resolvedAgentID := r.pickAgentID(agentID)
+		// For auto-register, use the generated agent ID directly without validation
+		// This allows dynamic agent creation without pre-configuration
+		var resolvedAgentID string
+		if matchedBy == "auto.register" {
+			resolvedAgentID = NormalizeAgentID(agentID)
+		} else {
+			resolvedAgentID = r.pickAgentID(agentID)
+		}
 		sessionKey := strings.ToLower(BuildAgentPeerSessionKey(SessionKeyParams{
 			AgentID:       resolvedAgentID,
 			Channel:       channel,
