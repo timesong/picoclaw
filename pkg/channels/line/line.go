@@ -32,6 +32,10 @@ const (
 	lineBotInfoEndpoint  = lineAPIBase + "/info"
 	lineLoadingEndpoint  = lineAPIBase + "/chat/loading/start"
 	lineReplyTokenMaxAge = 25 * time.Second
+
+	// Limit request body to prevent memory exhaustion (DoS).
+	// LINE webhook payloads are typically a few KB; 1 MiB is generous.
+	maxWebhookBodySize = 1 << 20 // 1 MiB
 )
 
 type replyTokenEntry struct {
@@ -166,12 +170,17 @@ func (c *LINEChannel) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodySize+1))
 	if err != nil {
 		logger.ErrorCF("line", "Failed to read request body", map[string]any{
 			"error": err.Error(),
 		})
 		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) > maxWebhookBodySize {
+		logger.WarnC("line", "Webhook request body too large, rejected")
+		http.Error(w, "Request entity too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -654,7 +663,10 @@ func (c *LINEChannel) callAPI(ctx context.Context, endpoint string, payload any)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return channels.ClassifySendError(resp.StatusCode, fmt.Errorf("reading LINE API error response: %w", err))
+		}
 		return channels.ClassifySendError(resp.StatusCode, fmt.Errorf("LINE API error: %s", string(respBody)))
 	}
 

@@ -1,7 +1,10 @@
 package openai_compat
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -102,6 +105,55 @@ func TestProviderChat_ParsesToolCalls(t *testing.T) {
 	}
 	if out.ToolCalls[0].Arguments["city"] != "SF" {
 		t.Fatalf("ToolCalls[0].Arguments[city] = %v, want SF", out.ToolCalls[0].Arguments["city"])
+	}
+}
+
+func TestProviderChat_ParsesToolCallsWithObjectArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]any{
+						"content": "",
+						"tool_calls": []map[string]any{
+							{
+								"id":   "call_1",
+								"type": "function",
+								"function": map[string]any{
+									"name": "get_weather",
+									"arguments": map[string]any{
+										"city":   "SF",
+										"metric": true,
+									},
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("ToolCalls[0].Name = %q, want %q", out.ToolCalls[0].Name, "get_weather")
+	}
+	if out.ToolCalls[0].Arguments["city"] != "SF" {
+		t.Fatalf("ToolCalls[0].Arguments[city] = %v, want SF", out.ToolCalls[0].Arguments["city"])
+	}
+	if out.ToolCalls[0].Arguments["metric"] != true {
+		t.Fatalf("ToolCalls[0].Arguments[metric] = %v, want true", out.ToolCalls[0].Arguments["metric"])
 	}
 }
 
@@ -212,6 +264,132 @@ func TestProviderChat_HTTPError(t *testing.T) {
 	}
 }
 
+func TestProviderChat_JSONHTTPErrorDoesNotReportHTML(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad request"}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	_, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Status: 400") {
+		t.Fatalf("expected status code in error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "returned HTML instead of JSON") {
+		t.Fatalf("expected non-HTML http error, got %v", err)
+	}
+}
+
+func TestProviderChat_HTMLResponsesReturnHelpfulError(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		statusCode  int
+		body        string
+	}{
+		{
+			name:        "html success response",
+			contentType: "text/html; charset=utf-8",
+			statusCode:  http.StatusOK,
+			body:        "<!DOCTYPE html><html><body>gateway login</body></html>",
+		},
+		{
+			name:        "html error response",
+			contentType: "text/html; charset=utf-8",
+			statusCode:  http.StatusBadGateway,
+			body:        "<!DOCTYPE html><html><body>bad gateway</body></html>",
+		},
+		{
+			name:        "mislabeled html success response",
+			contentType: "application/json",
+			statusCode:  http.StatusOK,
+			body:        "   \r\n\t<!DOCTYPE html><html><body>gateway login</body></html>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			p := NewProvider("key", server.URL, "")
+			_, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("Status: %d", tt.statusCode)) {
+				t.Fatalf("expected status code in error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "returned HTML instead of JSON") {
+				t.Fatalf("expected helpful HTML error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "check api_base or proxy configuration") {
+				t.Fatalf("expected configuration hint, got %v", err)
+			}
+		})
+	}
+}
+
+func TestProviderChat_SuccessResponseUsesStreamingDecoder(t *testing.T) {
+	content := strings.Repeat("a", 1024)
+	body := `{"choices":[{"message":{"content":"` + content + `"},"finish_reason":"stop"}]}`
+
+	p := NewProvider("key", "https://example.com/v1", "")
+	p.httpClient = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: &errAfterDataReadCloser{
+					data:      []byte(body),
+					chunkSize: 64,
+				},
+			}, nil
+		}),
+	}
+
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if out.Content != content {
+		t.Fatalf("Content = %q, want %q", out.Content, content)
+	}
+}
+
+func TestProviderChat_LargeHTMLResponsePreviewIsTruncated(t *testing.T) {
+	body := append([]byte("<!DOCTYPE html><html><body>"), bytes.Repeat([]byte("A"), 2048)...)
+	body = append(body, []byte("</body></html>")...)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	_, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Body:   <!DOCTYPE html><html><body>") {
+		t.Fatalf("expected html preview in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "...") {
+		t.Fatalf("expected truncated preview, got %v", err)
+	}
+}
+
 func TestProviderChat_StripsMoonshotPrefixAndNormalizesKimiTemperature(t *testing.T) {
 	var requestBody map[string]any
 
@@ -253,7 +431,7 @@ func TestProviderChat_StripsMoonshotPrefixAndNormalizesKimiTemperature(t *testin
 	}
 }
 
-func TestProviderChat_StripsGroqAndOllamaPrefixes(t *testing.T) {
+func TestProviderChat_StripsGroqOllamaDeepseekVivgridPrefixes(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     string
@@ -278,6 +456,11 @@ func TestProviderChat_StripsGroqAndOllamaPrefixes(t *testing.T) {
 			name:      "strips deepseek prefix",
 			input:     "deepseek/deepseek-chat",
 			wantModel: "deepseek-chat",
+		},
+		{
+			name:      "strips vivgrid prefix",
+			input:     "vivgrid/auto",
+			wantModel: "auto",
 		},
 	}
 
@@ -383,6 +566,12 @@ func TestNormalizeModel_UsesAPIBase(t *testing.T) {
 	if got := normalizeModel("openrouter/auto", "https://openrouter.ai/api/v1"); got != "openrouter/auto" {
 		t.Fatalf("normalizeModel(openrouter) = %q, want %q", got, "openrouter/auto")
 	}
+	if got := normalizeModel("vivgrid/managed", "https://api.vivgrid.com/v1"); got != "managed" {
+		t.Fatalf("normalizeModel(vivgrid) = %q, want %q", got, "managed")
+	}
+	if got := normalizeModel("vivgrid/auto", "https://api.vivgrid.com/v1"); got != "auto" {
+		t.Fatalf("normalizeModel(vivgrid auto) = %q, want %q", got, "auto")
+	}
 }
 
 func TestProvider_RequestTimeoutDefault(t *testing.T) {
@@ -397,6 +586,40 @@ func TestProvider_RequestTimeoutOverride(t *testing.T) {
 	if p.httpClient.Timeout != 300*time.Second {
 		t.Fatalf("http timeout = %v, want %v", p.httpClient.Timeout, 300*time.Second)
 	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type errAfterDataReadCloser struct {
+	data      []byte
+	chunkSize int
+	offset    int
+}
+
+func (r *errAfterDataReadCloser) Read(p []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+
+	n := r.chunkSize
+	if n <= 0 || n > len(p) {
+		n = len(p)
+	}
+	remaining := len(r.data) - r.offset
+	if n > remaining {
+		n = remaining
+	}
+	copy(p, r.data[r.offset:r.offset+n])
+	r.offset += n
+	return n, nil
+}
+
+func (r *errAfterDataReadCloser) Close() error {
+	return nil
 }
 
 func TestProvider_FunctionalOptionMaxTokensField(t *testing.T) {
@@ -492,6 +715,111 @@ func TestSerializeMessages_MediaWithToolCallID(t *testing.T) {
 	// Content should be multipart array
 	if _, ok := msgs[0]["content"].([]any); !ok {
 		t.Fatalf("expected array content, got %T", msgs[0]["content"])
+	}
+}
+
+// chatWithCacheKey sets up a test server, sends a Chat request with prompt_cache_key,
+// and returns the decoded request body for assertion.
+func chatWithCacheKey(t *testing.T, apiBase string) map[string]any {
+	t.Helper()
+	var requestBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message":       map[string]any{"content": "ok"},
+					"finish_reason": "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	p.apiBase = apiBase
+	p.httpClient = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			r.URL, _ = url.Parse(server.URL + r.URL.Path)
+			return http.DefaultTransport.RoundTrip(r)
+		}),
+	}
+
+	_, err := p.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"test-model",
+		map[string]any{"prompt_cache_key": "agent-main"},
+	)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	return requestBody
+}
+
+func TestProviderChat_PromptCacheKeySentToOpenAI(t *testing.T) {
+	body := chatWithCacheKey(t, "https://api.openai.com/v1")
+	if body["prompt_cache_key"] != "agent-main" {
+		t.Fatalf("prompt_cache_key = %v, want %q", body["prompt_cache_key"], "agent-main")
+	}
+}
+
+func TestProviderChat_PromptCacheKeyOmittedForNonOpenAI(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiBase string
+	}{
+		{"mistral", "https://api.mistral.ai/v1"},
+		{"gemini", "https://generativelanguage.googleapis.com/v1beta"},
+		{"deepseek", "https://api.deepseek.com/v1"},
+		{"groq", "https://api.groq.com/openai/v1"},
+		{"minimax", "https://api.minimaxi.com/v1"},
+		{"ollama_local", "http://localhost:11434/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := chatWithCacheKey(t, tt.apiBase)
+			if _, exists := body["prompt_cache_key"]; exists {
+				t.Fatalf("prompt_cache_key should NOT be sent to %s, but was included in request", tt.name)
+			}
+		})
+	}
+}
+
+func TestSupportsPromptCacheKey(t *testing.T) {
+	tests := []struct {
+		apiBase string
+		want    bool
+	}{
+		{"https://api.openai.com/v1", true},
+		{"https://api.openai.com/v1/", true},
+		{"https://myresource.openai.azure.com/openai/deployments/gpt-4", true},
+		{"https://eastus.openai.azure.com/v1", true},
+		{"https://api.mistral.ai/v1", false},
+		{"https://generativelanguage.googleapis.com/v1beta", false},
+		{"https://api.deepseek.com/v1", false},
+		{"https://api.groq.com/openai/v1", false},
+		{"http://localhost:11434/v1", false},
+		{"https://openrouter.ai/api/v1", false},
+		// Edge cases: proxy URLs with openai.com in path should NOT match
+		{"https://my-proxy.com/api.openai.com/v1", false},
+		{"https://proxy.example.com/openai.azure.com/v1", false},
+		// Malformed or empty
+		{"", false},
+		{"not-a-url", false},
+	}
+	for _, tt := range tests {
+		if got := supportsPromptCacheKey(tt.apiBase); got != tt.want {
+			t.Errorf("supportsPromptCacheKey(%q) = %v, want %v", tt.apiBase, got, tt.want)
+		}
 	}
 }
 
