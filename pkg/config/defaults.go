@@ -184,6 +184,10 @@ func DefaultConfig() *Config {
 				AllowOrigins:    []string{"*"},
 				MaxConnections:  100,
 				AllowFrom:       FlexibleStringSlice{},
+				Placeholder: PlaceholderConfig{
+					Enabled: true,
+					Text:    "Thinking... 💭",
+				},
 			},
 		},
 		Providers: ProvidersConfig{

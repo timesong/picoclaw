@@ -2,9 +2,13 @@ package sse_http
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 )
 
 // sseConn represents a single SSE connection.
@@ -303,23 +308,81 @@ func (c *SSEHTTPChannel) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		SessionID string         `json:"session_id"`
-		Content   string         `json:"content"`
-		Metadata  map[string]any `json:"metadata"`
+	var sessionID, content string
+	var metadataReq map[string]any
+	var mediaRefs []string
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// Make sure io and filepath and os are imported correctly in the file.
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, "failed to parse multipart form", http.StatusBadRequest)
+			return
+		}
+
+		sessionID = r.FormValue("session_id")
+		content = r.FormValue("content")
+
+		if metaStr := r.FormValue("metadata"); metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &metadataReq)
+		}
+
+		if r.MultipartForm != nil && r.MultipartForm.File != nil {
+			store := c.GetMediaStore()
+			if store != nil {
+				scope := channels.BuildMediaScope("sse_http", "sse_http:"+sessionID, uuid.New().String())
+				mediaDir := media.TempDir()
+				_ = os.MkdirAll(mediaDir, 0o700)
+
+				for _, fileHeaders := range r.MultipartForm.File {
+					for _, fileHeader := range fileHeaders {
+						file, err := fileHeader.Open()
+						if err == nil {
+							localPath := filepath.Join(mediaDir, uuid.New().String()+"-"+fileHeader.Filename)
+							if out, err := os.Create(localPath); err == nil {
+								// Need io copy! (Assumes "io" is imported in the file)
+								_, _ = io.Copy(out, file)
+								out.Close()
+
+								meta := media.MediaMeta{
+									Filename:    fileHeader.Filename,
+									ContentType: fileHeader.Header.Get("Content-Type"),
+									Source:      "sse_http",
+								}
+								if ref, err := store.Store(localPath, meta, scope); err == nil {
+									mediaRefs = append(mediaRefs, ref)
+								} else {
+									os.Remove(localPath)
+								}
+							}
+							file.Close()
+						}
+					}
+				}
+			}
+		}
+	} else {
+		var req struct {
+			SessionID string         `json:"session_id"`
+			Content   string         `json:"content"`
+			Metadata  map[string]any `json:"metadata"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		sessionID = req.SessionID
+		content = req.Content
+		metadataReq = req.Metadata
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if strings.TrimSpace(content) == "" && len(mediaRefs) == 0 {
+		http.Error(w, "content or media is required", http.StatusBadRequest)
 		return
 	}
 
-	if strings.TrimSpace(req.Content) == "" {
-		http.Error(w, "content is required", http.StatusBadRequest)
-		return
-	}
-
-	sessionID := req.SessionID
 	if sessionID == "" {
 		sessionID = "default"
 	}
@@ -328,14 +391,13 @@ func (c *SSEHTTPChannel) handleSend(w http.ResponseWriter, r *http.Request) {
 	senderID := "sse_http-user"
 
 	peer := bus.Peer{Kind: "direct", ID: "sse_http:" + sessionID}
-
 	msgID := uuid.New().String()
 
 	metadata := map[string]string{
 		"platform":   "sse_http",
 		"session_id": sessionID,
 	}
-	for k, v := range req.Metadata {
+	for k, v := range metadataReq {
 		metadata[k] = fmt.Sprintf("%v", v)
 	}
 
@@ -350,10 +412,71 @@ func (c *SSEHTTPChannel) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.HandleMessage(c.ctx, peer, msgID, senderID, chatID, req.Content, nil, metadata, sender)
+	c.HandleMessage(c.ctx, peer, msgID, senderID, chatID, content, mediaRefs, metadata, sender)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message_id": msgID})
+}
+
+// SendMedia implements channels.MediaSender.
+func (c *SSEHTTPChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) error {
+	if !c.IsRunning() {
+		return channels.ErrNotRunning
+	}
+
+	store := c.GetMediaStore()
+	if store == nil {
+		return fmt.Errorf("media store not available")
+	}
+
+	var mediaPayloads []map[string]any
+
+	for _, part := range msg.Parts {
+		localPath, err := store.Resolve(part.Ref)
+		if err != nil {
+			logger.ErrorCF("sse_http", "Failed to resolve media", map[string]any{"ref": part.Ref})
+			continue
+		}
+
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			logger.ErrorCF("sse_http", "Failed to read media file", map[string]any{"path": localPath})
+			continue
+		}
+
+		// Assumes encoding/base64 is imported or we can just add it to import path
+		encoded := "data:"
+		mimeType := part.ContentType
+		if mimeType == "" {
+			if part.Type == "image" {
+				mimeType = "image/jpeg"
+			} else if part.Type == "audio" {
+				mimeType = "audio/ogg" // default
+			} else if part.Type == "video" {
+				mimeType = "video/mp4"
+			} else {
+				mimeType = "application/octet-stream"
+			}
+		}
+
+		encoded += mimeType + ";base64,"
+		encoded += base64.StdEncoding.EncodeToString(data)
+
+		mediaPayloads = append(mediaPayloads, map[string]any{
+			"type":      part.Type,
+			"mime_type": mimeType,
+			"filename":  part.Filename,
+			"data":      encoded,
+		})
+	}
+
+	if len(mediaPayloads) == 0 {
+		return fmt.Errorf("no valid media to send")
+	}
+
+	return c.broadcastToSession(msg.ChatID, "media", map[string]any{
+		"media": mediaPayloads,
+	})
 }
 
 // Send implements Channel.
