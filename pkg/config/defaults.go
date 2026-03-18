@@ -405,8 +405,9 @@ func DefaultConfig() *Config {
 			},
 		},
 		Gateway: GatewayConfig{
-			Host: "127.0.0.1",
-			Port: 18790,
+			Host:      "127.0.0.1",
+			Port:      18790,
+			HotReload: false,
 		},
 		Tools: ToolsConfig{
 			MediaCleanup: MediaCleanupConfig{
@@ -422,6 +423,7 @@ func DefaultConfig() *Config {
 				},
 				Proxy:           "",
 				FetchLimitBytes: 10 * 1024 * 1024, // 10MB by default
+				Format:          "plaintext",
 				Brave: BraveConfig{
 					Enabled:    false,
 					APIKey:     "",

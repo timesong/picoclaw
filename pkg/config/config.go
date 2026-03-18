@@ -694,8 +694,9 @@ func (c *ModelConfig) Validate() error {
 }
 
 type GatewayConfig struct {
-	Host string `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
-	Port int    `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+	Host      string `json:"host"       env:"PICOCLAW_GATEWAY_HOST"`
+	Port      int    `json:"port"       env:"PICOCLAW_GATEWAY_PORT"`
+	HotReload bool   `json:"hot_reload" env:"PICOCLAW_GATEWAY_HOT_RELOAD"`
 }
 
 type ToolDiscoveryConfig struct {
@@ -763,8 +764,10 @@ type WebToolsConfig struct {
 	GLMSearch  GLMSearchConfig  `                                json:"glm_search"`
 	// Proxy is an optional proxy URL for web tools (http/https/socks5/socks5h).
 	// For authenticated proxies, prefer HTTP_PROXY/HTTPS_PROXY env vars instead of embedding credentials in config.
-	Proxy           string `json:"proxy,omitempty"             env:"PICOCLAW_TOOLS_WEB_PROXY"`
-	FetchLimitBytes int64  `json:"fetch_limit_bytes,omitempty" env:"PICOCLAW_TOOLS_WEB_FETCH_LIMIT_BYTES"`
+	Proxy                string              `json:"proxy,omitempty"                  env:"PICOCLAW_TOOLS_WEB_PROXY"`
+	FetchLimitBytes      int64               `json:"fetch_limit_bytes,omitempty"      env:"PICOCLAW_TOOLS_WEB_FETCH_LIMIT_BYTES"`
+	Format               string              `json:"format,omitempty"                 env:"PICOCLAW_TOOLS_WEB_FORMAT"`
+	PrivateHostWhitelist FlexibleStringSlice `json:"private_host_whitelist,omitempty" env:"PICOCLAW_TOOLS_WEB_PRIVATE_HOST_WHITELIST"`
 }
 
 type CronToolsConfig struct {
@@ -1097,7 +1100,7 @@ func (c *Config) GetModelConfig(modelName string) (*ModelConfig, error) {
 	}
 
 	// Multiple configs - use round-robin for load balancing
-	idx := rrCounter.Add(1) % uint64(len(matches))
+	idx := (rrCounter.Add(1) - 1) % uint64(len(matches))
 	return &matches[idx], nil
 }
 
