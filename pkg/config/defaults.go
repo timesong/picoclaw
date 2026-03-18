@@ -179,6 +179,7 @@ func DefaultConfig() *Config {
 				Enabled:         false,
 				Host:            "0.0.0.0",
 				Port:            18795,
+				Password:        "",
 				Token:           "",
 				AllowTokenQuery: true,
 				AllowOrigins:    []string{"*"},

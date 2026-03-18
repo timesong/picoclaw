@@ -60,12 +60,13 @@ func (sc *sseConn) close() {
 // SSEHTTPChannel implements the SSE + HTTP channel.
 type SSEHTTPChannel struct {
 	*channels.BaseChannel
-	config      config.SSEHTTPConfig
-	connections sync.Map // connID → *sseConn
-	connCount   atomic.Int32
-	ctx         context.Context
-	cancel      context.CancelFunc
-	server      *http.Server
+	config       config.SSEHTTPConfig
+	connections  sync.Map // connID → *sseConn
+	activeTokens sync.Map // token  → bool
+	connCount    atomic.Int32
+	ctx          context.Context
+	cancel       context.CancelFunc
+	server       *http.Server
 }
 
 // NewSSEHTTPChannel creates a new SSE+HTTP channel.
@@ -163,23 +164,56 @@ func (c *SSEHTTPChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	path := strings.TrimPrefix(r.URL.Path, "/sse_http/")
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimRight(path, "/")
+
 	// Authenticate
-	if !c.authenticate(r) {
+	if path != "login" && !c.authenticate(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/sse_http/")
-	path = strings.TrimPrefix(path, "/")
-
-	switch {
-	case path == "sse":
+	switch path {
+	case "sse":
 		c.handleSSE(w, r)
-	case path == "send":
+	case "send":
 		c.handleSend(w, r)
+	case "login":
+		c.handleLogin(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (c *SSEHTTPChannel) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if c.config.Password != "" && req.Password != c.config.Password {
+		http.Error(w, "invalid password", http.StatusUnauthorized)
+		return
+	}
+
+	// Generate a dynamic token for this session
+	t := uuid.New().String()
+	c.activeTokens.Store(t, true)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"token": t,
+	})
 }
 
 func (c *SSEHTTPChannel) handleCORS(w http.ResponseWriter, r *http.Request) bool {
@@ -215,22 +249,33 @@ func (c *SSEHTTPChannel) handleCORS(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (c *SSEHTTPChannel) authenticate(r *http.Request) bool {
-	token := c.config.Token
-	if token == "" {
-		return true // skip if not configured
+	// If neither static token nor password is required, skip auth.
+	if c.config.Token == "" && c.config.Password == "" {
+		return true
 	}
 
+	var reqToken string
 	auth := r.Header.Get("Authorization")
 	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
-		if after == token {
-			return true
-		}
+		reqToken = after
 	}
 
-	if c.config.AllowTokenQuery {
-		if r.URL.Query().Get("token") == token {
-			return true
-		}
+	if reqToken == "" && c.config.AllowTokenQuery {
+		reqToken = r.URL.Query().Get("token")
+	}
+
+	if reqToken == "" {
+		return false
+	}
+
+	// Check if token matches static token
+	if c.config.Token != "" && reqToken == c.config.Token {
+		return true
+	}
+
+	// Check if token is in active generated tokens
+	if _, ok := c.activeTokens.Load(reqToken); ok {
+		return true
 	}
 
 	return false

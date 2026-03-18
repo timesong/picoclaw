@@ -552,6 +552,7 @@ type SSEHTTPConfig struct {
 	Enabled            bool                `json:"enabled"                     env:"PICOCLAW_CHANNELS_SSE_HTTP_ENABLED"`
 	Host               string              `json:"host"                        env:"PICOCLAW_CHANNELS_SSE_HTTP_HOST"`
 	Port               int                 `json:"port"                        env:"PICOCLAW_CHANNELS_SSE_HTTP_PORT"`
+	Password           string              `json:"password"                    env:"PICOCLAW_CHANNELS_SSE_HTTP_PASSWORD"`
 	Token              string              `json:"token"                       env:"PICOCLAW_CHANNELS_SSE_HTTP_TOKEN"`
 	AllowTokenQuery    bool                `json:"allow_token_query,omitempty"`
 	AllowOrigins       []string            `json:"allow_origins,omitempty"`
