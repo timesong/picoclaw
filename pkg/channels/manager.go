@@ -307,6 +307,10 @@ func (m *Manager) initChannels() error {
 		m.initChannel("irc", "IRC")
 	}
 
+	if m.config.Channels.SSEHTTP.Enabled {
+		m.initChannel("sse_http", "SSE+HTTP")
+	}
+
 	logger.InfoCF("channels", "Channel initialization completed", map[string]any{
 		"enabled_channels": len(m.channels),
 	})
@@ -328,18 +332,24 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 	// Discover and register webhook handlers and health checkers
 	for name, ch := range m.channels {
 		if wh, ok := ch.(WebhookHandler); ok {
-			m.mux.Handle(wh.WebhookPath(), wh)
-			logger.InfoCF("channels", "Webhook handler registered", map[string]any{
-				"channel": name,
-				"path":    wh.WebhookPath(),
-			})
+			path := wh.WebhookPath()
+			if path != "" {
+				m.mux.Handle(path, wh)
+				logger.InfoCF("channels", "Webhook handler registered", map[string]any{
+					"channel": name,
+					"path":    path,
+				})
+			}
 		}
 		if hc, ok := ch.(HealthChecker); ok {
-			m.mux.HandleFunc(hc.HealthPath(), hc.HealthHandler)
-			logger.InfoCF("channels", "Health endpoint registered", map[string]any{
-				"channel": name,
-				"path":    hc.HealthPath(),
-			})
+			path := hc.HealthPath()
+			if path != "" {
+				m.mux.HandleFunc(path, hc.HealthHandler)
+				logger.InfoCF("channels", "Health endpoint registered", map[string]any{
+					"channel": name,
+					"path":    path,
+				})
+			}
 		}
 	}
 

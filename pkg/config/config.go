@@ -328,6 +328,7 @@ type ChannelsConfig struct {
 	WeComAIBot WeComAIBotConfig `json:"wecom_aibot"`
 	Pico       PicoConfig       `json:"pico"`
 	IRC        IRCConfig        `json:"irc"`
+	SSEHTTP    SSEHTTPConfig    `json:"sse_http"`
 }
 
 // GroupTriggerConfig controls when the bot responds in group chats.
@@ -545,6 +546,19 @@ type IRCConfig struct {
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	Typing             TypingConfig        `json:"typing,omitempty"`
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_IRC_REASONING_CHANNEL_ID"`
+}
+
+type SSEHTTPConfig struct {
+	Enabled            bool                `json:"enabled"                     env:"PICOCLAW_CHANNELS_SSE_HTTP_ENABLED"`
+	Host               string              `json:"host"                        env:"PICOCLAW_CHANNELS_SSE_HTTP_HOST"`
+	Port               int                 `json:"port"                        env:"PICOCLAW_CHANNELS_SSE_HTTP_PORT"`
+	Token              string              `json:"token"                       env:"PICOCLAW_CHANNELS_SSE_HTTP_TOKEN"`
+	AllowTokenQuery    bool                `json:"allow_token_query,omitempty"`
+	AllowOrigins       []string            `json:"allow_origins,omitempty"`
+	MaxConnections     int                 `json:"max_connections,omitempty"`
+	ReasoningChannelID string              `json:"reasoning_channel_id,omitempty"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"                  env:"PICOCLAW_CHANNELS_SSE_HTTP_ALLOW_FROM"`
+	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
 }
 
 type HeartbeatConfig struct {

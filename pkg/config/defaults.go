@@ -175,6 +175,16 @@ func DefaultConfig() *Config {
 				MaxConnections: 100,
 				AllowFrom:      FlexibleStringSlice{},
 			},
+			SSEHTTP: SSEHTTPConfig{
+				Enabled:         false,
+				Host:            "0.0.0.0",
+				Port:            18795,
+				Token:           "",
+				AllowTokenQuery: true,
+				AllowOrigins:    []string{"*"},
+				MaxConnections:  100,
+				AllowFrom:       FlexibleStringSlice{},
+			},
 		},
 		Providers: ProvidersConfig{
 			OpenAI: OpenAIProviderConfig{WebSearch: true},
