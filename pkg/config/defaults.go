@@ -26,6 +26,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
+				LogLevel:                  "fatal",
 				Workspace:                 workspacePath,
 				RestrictToWorkspace:       true,
 				Provider:                  "",
@@ -62,6 +63,7 @@ func DefaultConfig() *Config {
 					Enabled: true,
 					Text:    "Thinking... 💭",
 				},
+				Streaming:     StreamingConfig{Enabled: true, ThrottleSeconds: 3, MinGrowthChars: 200},
 				UseMarkdownV2: false,
 			},
 			Feishu: FeishuConfig{
@@ -172,6 +174,14 @@ func DefaultConfig() *Config {
 				MaxSteps:          10,
 				WelcomeMessage:    "Hello! I'm your AI assistant. How can I help you today?",
 				ProcessingMessage: DefaultWeComAIBotProcessingMessage,
+			},
+			Weixin: WeixinConfig{
+				Enabled:    false,
+				Token:      "",
+				BaseURL:    "https://ilinkai.weixin.qq.com/",
+				CDNBaseURL: "https://novac2c.cdn.weixin.qq.com/c2c",
+				AllowFrom:  FlexibleStringSlice{},
+				Proxy:      "",
 			},
 			Pico: PicoConfig{
 				Enabled:        false,

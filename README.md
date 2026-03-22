@@ -105,6 +105,8 @@ _*Recent versions may use 10–20MB due to rapid feature merges. Resource optimi
 
 <img src="assets/compare.jpg" alt="PicoClaw" width="512">
 
+> 📋 **[Hardware Compatibility List](docs/hardware-compatibility.md)** — See all tested boards, from $5 RISC-V to Raspberry Pi to Android phones. Your board not listed? Submit a PR!
+
 ## 🦾 Demonstration
 
 ### 🛠️ Standard Assistant Workflows
@@ -139,7 +141,7 @@ Give your decade-old phone a second life! Turn it into a smart AI Assistant with
 wget https://github.com/sipeed/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
 tar xzf picoclaw_Linux_arm64.tar.gz
 pkg install proot
-termux-chroot ./picoclaw onboard
+termux-chroot ./picoclaw onboard   # chroot provides a standard Linux filesystem layout
 ```
 
 And then follow the instructions in the "Quick Start" section to complete the configuration!
@@ -160,11 +162,15 @@ PicoClaw can be deployed on almost any Linux device!
 
 ## 📦 Install
 
-### Install with precompiled binary
+### Download from picoclaw.io (Recommended)
 
-Download the binary for your platform from the [Releases](https://github.com/sipeed/picoclaw/releases) page.
+Visit **[picoclaw.io](https://picoclaw.io)** — the official website auto-detects your platform and provides one-click download. No need to manually pick an architecture.
 
-### Install from source (latest features, recommended for development)
+### Download precompiled binary
+
+Alternatively, download the binary for your platform from the [GitHub Releases](https://github.com/sipeed/picoclaw/releases) page.
+
+### Build from source (for development)
 
 ```bash
 git clone https://github.com/sipeed/picoclaw.git
@@ -357,6 +363,7 @@ Talk to your picoclaw through Telegram, Discord, WhatsApp, Matrix, QQ, DingTalk,
 | **Telegram** | Easy (just a token)                |
 | **Discord**  | Easy (bot token + intents)         |
 | **WhatsApp** | Easy (native: QR scan; or bridge URL) |
+| **Weixin**   | Easy (Native QR scan)                 |
 | **Matrix**   | Medium (homeserver + bot access token) |
 | **QQ**       | Easy (AppID + AppSecret)           |
 | **DingTalk** | Medium (app credentials)           |
@@ -500,6 +507,39 @@ PicoClaw can connect to WhatsApp in two ways:
 ```
 
 If `session_store_path` is empty, the session is stored in `&lt;workspace&gt;/whatsapp/`. Run `picoclaw gateway`; on first run, scan the QR code printed in the terminal with WhatsApp → Linked Devices.
+
+</details>
+
+<details>
+<summary><b>Weixin</b> (WeChat Personal)</summary>
+
+PicoClaw supports connecting to your personal WeChat account using the official Tencent iLink API.
+
+**1. Login**
+Run the interactive QR login flow:
+```bash
+picoclaw onboard weixin
+```
+Scan the printed QR code with your WeChat mobile app. On success, the token is saved to your config.
+
+**2. Configure**
+(Optional) Update `allow_from` with your WeChat User ID to restrict who can message the bot:
+```json
+{
+  "channels": {
+    "weixin": {
+      "enabled": true,
+      "token": "YOUR_TOKEN",
+      "allow_from": ["YOUR_USER_ID"]
+    }
+  }
+}
+```
+
+**3. Run**
+```bash
+picoclaw gateway
+```
 
 </details>
 
@@ -707,6 +747,7 @@ Connect Picoclaw to the Agent Social Network simply by sending a single message 
 | Command                   | Description                   |
 | ------------------------- | ----------------------------- |
 | `picoclaw onboard`        | Initialize config & workspace |
+| `picoclaw onboard weixin` | Connect WeChat account via QR |
 | `picoclaw agent -m "..."` | Chat with the agent           |
 | `picoclaw agent`          | Interactive chat mode         |
 | `picoclaw gateway`        | Start the gateway             |
@@ -741,4 +782,5 @@ User Groups:
 
 discord: <https://discord.gg/V4sAZ9XWpN>
 
-<img src="assets/wechat.png" alt="PicoClaw" width="512">
+WeChat:
+<img src="assets/wechat.png" alt="WeChat group QR code" width="512">

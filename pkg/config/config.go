@@ -278,6 +278,7 @@ type AgentDefaults struct {
 	MaxMediaSize              int                 `json:"max_media_size,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
 	Routing                   *RoutingConfig      `json:"routing,omitempty"`
 	ToolFeedback              ToolFeedbackConfig  `json:"tool_feedback,omitempty"`
+	LogLevel                  string             `json:"log_level,omitempty"             env:"PICOCLAW_LOG_LEVEL"`
 	AutoRegister              *AutoRegisterConfig `json:"auto_register,omitempty"`
 }
 
@@ -351,7 +352,9 @@ type ChannelsConfig struct {
 	WeCom      WeComConfig      `json:"wecom"`
 	WeComApp   WeComAppConfig   `json:"wecom_app"`
 	WeComAIBot WeComAIBotConfig `json:"wecom_aibot"`
+	Weixin     WeixinConfig     `json:"weixin"`
 	Pico       PicoConfig       `json:"pico"`
+	PicoClient PicoClientConfig `json:"pico_client"`
 	IRC        IRCConfig        `json:"irc"`
 	SSEHTTP    SSEHTTPConfig    `json:"sse_http"`
 }
@@ -373,6 +376,12 @@ type PlaceholderConfig struct {
 	Text    string `json:"text,omitempty"`
 }
 
+type StreamingConfig struct {
+	Enabled         bool `json:"enabled,omitempty"          env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED"`
+	ThrottleSeconds int  `json:"throttle_seconds,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS"`
+	MinGrowthChars  int  `json:"min_growth_chars,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS"`
+}
+
 type WhatsAppConfig struct {
 	Enabled            bool                `json:"enabled"              env:"PICOCLAW_CHANNELS_WHATSAPP_ENABLED"`
 	BridgeURL          string              `json:"bridge_url"           env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
@@ -391,6 +400,7 @@ type TelegramConfig struct {
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	Typing             TypingConfig        `json:"typing,omitempty"`
 	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
+	Streaming          StreamingConfig     `json:"streaming,omitempty"`
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_TELEGRAM_REASONING_CHANNEL_ID"`
 	UseMarkdownV2      bool                `json:"use_markdown_v2"         env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 }
@@ -547,6 +557,16 @@ type WeComAIBotConfig struct {
 	ReasoningChannelID string              `json:"reasoning_channel_id"         env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REASONING_CHANNEL_ID"`
 }
 
+type WeixinConfig struct {
+	Enabled            bool                `json:"enabled"              env:"PICOCLAW_CHANNELS_WEIXIN_ENABLED"`
+	Token              string              `json:"token"                env:"PICOCLAW_CHANNELS_WEIXIN_TOKEN"`
+	BaseURL            string              `json:"base_url"             env:"PICOCLAW_CHANNELS_WEIXIN_BASE_URL"`
+	CDNBaseURL         string              `json:"cdn_base_url"         env:"PICOCLAW_CHANNELS_WEIXIN_CDN_BASE_URL"`
+	Proxy              string              `json:"proxy"                env:"PICOCLAW_CHANNELS_WEIXIN_PROXY"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"           env:"PICOCLAW_CHANNELS_WEIXIN_ALLOW_FROM"`
+	ReasoningChannelID string              `json:"reasoning_channel_id" env:"PICOCLAW_CHANNELS_WEIXIN_REASONING_CHANNEL_ID"`
+}
+
 type PicoConfig struct {
 	Enabled         bool                `json:"enabled"                     env:"PICOCLAW_CHANNELS_PICO_ENABLED"`
 	Token           string              `json:"token"                       env:"PICOCLAW_CHANNELS_PICO_TOKEN"`
@@ -558,6 +578,16 @@ type PicoConfig struct {
 	MaxConnections  int                 `json:"max_connections,omitempty"`
 	AllowFrom       FlexibleStringSlice `json:"allow_from"                  env:"PICOCLAW_CHANNELS_PICO_ALLOW_FROM"`
 	Placeholder     PlaceholderConfig   `json:"placeholder,omitempty"`
+}
+
+type PicoClientConfig struct {
+	Enabled      bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_PICO_CLIENT_ENABLED"`
+	URL          string              `json:"url"                     env:"PICOCLAW_CHANNELS_PICO_CLIENT_URL"`
+	Token        string              `json:"token"                   env:"PICOCLAW_CHANNELS_PICO_CLIENT_TOKEN"`
+	SessionID    string              `json:"session_id,omitempty"`
+	PingInterval int                 `json:"ping_interval,omitempty"`
+	ReadTimeout  int                 `json:"read_timeout,omitempty"`
+	AllowFrom    FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_PICO_CLIENT_ALLOW_FROM"`
 }
 
 type IRCConfig struct {

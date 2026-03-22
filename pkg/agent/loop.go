@@ -70,7 +70,8 @@ type processOptions struct {
 }
 
 const (
-	defaultResponse           = "I've completed processing but have no response to give. Increase `max_tool_iterations` in config.json."
+	defaultResponse           = "The model returned an empty response. This may indicate a provider error or token limit."
+	toolLimitResponse         = "I've reached `max_tool_iterations` without a final response. Increase `max_tool_iterations` in config.json if this task needs more tool steps."
 	sessionKeyAgentPrefix     = "agent:"
 	metadataKeyAccountID      = "account_id"
 	metadataKeyGuildID        = "guild_id"
@@ -963,7 +964,11 @@ func (al *AgentLoop) runAgentLoop(
 
 	// 4. Handle empty response
 	if finalContent == "" {
-		finalContent = opts.DefaultResponse
+		if iteration >= agent.MaxIterations && agent.MaxIterations > 0 {
+			finalContent = toolLimitResponse
+		} else {
+			finalContent = opts.DefaultResponse
+		}
 	}
 
 	// 5. Save final assistant message to session
@@ -1054,6 +1059,7 @@ func (al *AgentLoop) handleReasoning(
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
+// Returns (finalContent, iteration, error).
 func (al *AgentLoop) runLLMIteration(
 	ctx context.Context,
 	agent *AgentInstance,
@@ -1062,6 +1068,13 @@ func (al *AgentLoop) runLLMIteration(
 ) (string, int, error) {
 	iteration := 0
 	var finalContent string
+
+	// Check if both the provider and channel support streaming
+	streamProvider, providerCanStream := agent.Provider.(providers.StreamingProvider)
+	var streamer bus.Streamer
+	if providerCanStream && !opts.NoHistory && !constants.IsInternalChannel(opts.Channel) {
+		streamer, _ = al.bus.GetStreamer(ctx, opts.Channel, opts.ChatID)
+	}
 
 	// Determine effective model tier for this conversation turn.
 	// selectCandidates evaluates routing once and the decision is sticky for
@@ -1143,6 +1156,16 @@ func (al *AgentLoop) runLLMIteration(
 		callLLM := func() (*providers.LLMResponse, error) {
 			al.activeRequests.Add(1)
 			defer al.activeRequests.Done()
+
+			// Use streaming when available (streamer obtained, provider supports it)
+			if streamer != nil && streamProvider != nil {
+				return streamProvider.ChatStream(
+					ctx, messages, providerToolDefs, activeModel, llmOpts,
+					func(accumulated string) {
+						streamer.Update(ctx, accumulated)
+					},
+				)
+			}
 
 			if len(activeCandidates) > 1 && al.fallback != nil {
 				fbResult, fbErr := al.fallback.Execute(
@@ -1271,13 +1294,29 @@ func (al *AgentLoop) runLLMIteration(
 			if finalContent == "" && response.ReasoningContent != "" {
 				finalContent = response.ReasoningContent
 			}
+
+			// If we were streaming, finalize the message (sends the permanent message)
+			if streamer != nil {
+				if err := streamer.Finalize(ctx, finalContent); err != nil {
+					logger.WarnCF("agent", "Stream finalize failed", map[string]any{
+						"error": err.Error(),
+					})
+				}
+			}
+
 			logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
 				map[string]any{
 					"agent_id":      agent.ID,
 					"iteration":     iteration,
 					"content_chars": len(finalContent),
+					"streamed":      streamer != nil,
 				})
 			break
+		}
+
+		// Tool calls detected — cancel any active stream (draft auto-expires)
+		if streamer != nil {
+			streamer.Cancel(ctx)
 		}
 
 		normalizedToolCalls := make([]providers.ToolCall, 0, len(response.ToolCalls))
