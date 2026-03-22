@@ -23,12 +23,19 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
+// tokenInfo stores token and its expiration time.
+type tokenInfo struct {
+	token     string
+	expiresAt time.Time
+}
+
 // sseConn represents a single SSE connection.
 type sseConn struct {
 	id        string
 	w         http.ResponseWriter
 	flusher   http.Flusher
 	sessionID string
+	token     string // the token used to authenticate this connection
 	closed    atomic.Bool
 	done      chan struct{}
 }
@@ -62,7 +69,7 @@ type SSEHTTPChannel struct {
 	*channels.BaseChannel
 	config       config.SSEHTTPConfig
 	connections  sync.Map // connID → *sseConn
-	activeTokens sync.Map // token  → bool
+	activeTokens sync.Map // token  → *tokenInfo
 	connCount    atomic.Int32
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -103,6 +110,11 @@ func (c *SSEHTTPChannel) Start(ctx context.Context) error {
 				})
 			}
 		}()
+	}
+
+	// Start token cleanup goroutine if TTL is configured
+	if c.config.TokenTTLMinutes > 0 {
+		go c.tokenCleanupLoop()
 	}
 
 	c.SetRunning(true)
@@ -181,6 +193,8 @@ func (c *SSEHTTPChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.handleSend(w, r)
 	case "login":
 		c.handleLogin(w, r)
+	case "refresh":
+		c.handleRefresh(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -208,11 +222,18 @@ func (c *SSEHTTPChannel) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a dynamic token for this session
 	t := uuid.New().String()
-	c.activeTokens.Store(t, true)
+	ttl := c.getTokenTTL()
+	info := &tokenInfo{
+		token:     t,
+		expiresAt: time.Now().Add(ttl),
+	}
+	c.activeTokens.Store(t, info)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token": t,
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":      t,
+		"expires_in": int(ttl.Seconds()),
+		"expires_at": info.expiresAt.Unix(),
 	})
 }
 
@@ -273,9 +294,15 @@ func (c *SSEHTTPChannel) authenticate(r *http.Request) bool {
 		return true
 	}
 
-	// Check if token is in active generated tokens
-	if _, ok := c.activeTokens.Load(reqToken); ok {
-		return true
+	// Check if token is in active generated tokens and not expired
+	if val, ok := c.activeTokens.Load(reqToken); ok {
+		if info, ok := val.(*tokenInfo); ok {
+			if time.Now().Before(info.expiresAt) {
+				return true
+			}
+			// Token expired, remove it
+			c.activeTokens.Delete(reqToken)
+		}
 	}
 
 	return false
@@ -303,11 +330,22 @@ func (c *SSEHTTPChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 		sessionID = uuid.New().String()
 	}
 
+	// Extract the token used for authentication
+	var connToken string
+	auth := r.Header.Get("Authorization")
+	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		connToken = after
+	}
+	if connToken == "" && c.config.AllowTokenQuery {
+		connToken = r.URL.Query().Get("token")
+	}
+
 	sc := &sseConn{
 		id:        uuid.New().String(),
 		w:         w,
 		flusher:   flusher,
 		sessionID: sessionID,
+		token:     connToken,
 		done:      make(chan struct{}),
 	}
 
@@ -327,17 +365,58 @@ func (c *SSEHTTPChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 	_ = sc.writeEvent("connected", map[string]string{"session_id": sessionID})
 
 	// Keeper alive ticker
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
 
-	select {
-	case <-r.Context().Done():
-	case <-c.ctx.Done():
-	case <-sc.done:
-	case <-ticker.C:
-		_ = sc.writeEvent("ping", nil)
+	// Token expiry warning ticker (check every minute if token is about to expire)
+	var tokenCheckTicker *time.Ticker
+	if c.config.TokenTTLMinutes > 0 && connToken != "" {
+		tokenCheckTicker = time.NewTicker(1 * time.Minute)
+		defer tokenCheckTicker.Stop()
 	}
 
+	for {
+		select {
+		case <-r.Context().Done():
+			goto cleanup
+		case <-c.ctx.Done():
+			goto cleanup
+		case <-sc.done:
+			goto cleanup
+		case <-pingTicker.C:
+			_ = sc.writeEvent("ping", nil)
+		case <-func() <-chan time.Time {
+			if tokenCheckTicker != nil {
+				return tokenCheckTicker.C
+			}
+			return nil
+		}():
+			// Check if token is about to expire
+			if connToken != "" {
+				if val, ok := c.activeTokens.Load(connToken); ok {
+					if info, ok := val.(*tokenInfo); ok {
+						timeUntilExpiry := time.Until(info.expiresAt)
+						// Warn if less than 5 minutes remaining
+						if timeUntilExpiry > 0 && timeUntilExpiry < 5*time.Minute {
+							_ = sc.writeEvent("token_expiring", map[string]any{
+								"expires_at": info.expiresAt.Unix(),
+								"expires_in": int(timeUntilExpiry.Seconds()),
+								"message":    "Your token is about to expire. Please refresh your token.",
+							})
+						} else if timeUntilExpiry <= 0 {
+							// Token has expired
+							_ = sc.writeEvent("token_expired", map[string]any{
+								"message": "Your token has expired. Please login again.",
+							})
+							goto cleanup
+						}
+					}
+				}
+			}
+		}
+	}
+
+cleanup:
 	sc.close()
 	c.connections.Delete(sc.id)
 	c.connCount.Add(-1)
@@ -602,4 +681,129 @@ func (c *SSEHTTPChannel) broadcastToSession(chatID string, event string, data an
 		logger.DebugCF("sse_http", "No active connections for session", map[string]any{"session_id": sessionID})
 	}
 	return nil
+}
+
+func (c *SSEHTTPChannel) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract current token from Authorization header or query parameter
+	var currentToken string
+	auth := r.Header.Get("Authorization")
+	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		currentToken = after
+	}
+
+	if currentToken == "" && c.config.AllowTokenQuery {
+		currentToken = r.URL.Query().Get("token")
+	}
+
+	if currentToken == "" {
+		http.Error(w, "no token provided", http.StatusBadRequest)
+		return
+	}
+
+	// Verify current token exists and is valid (not expired)
+	val, ok := c.activeTokens.Load(currentToken)
+	if !ok {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	info, ok := val.(*tokenInfo)
+	if !ok || time.Now().After(info.expiresAt) {
+		c.activeTokens.Delete(currentToken)
+		http.Error(w, "token expired", http.StatusUnauthorized)
+		return
+	}
+
+	// Generate new token
+	newToken := uuid.New().String()
+	ttl := c.getTokenTTL()
+	newInfo := &tokenInfo{
+		token:     newToken,
+		expiresAt: time.Now().Add(ttl),
+	}
+	c.activeTokens.Store(newToken, newInfo)
+
+	// Remove old token
+	c.activeTokens.Delete(currentToken)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":      newToken,
+		"expires_in": int(ttl.Seconds()),
+		"expires_at": newInfo.expiresAt.Unix(),
+	})
+
+	logger.InfoCF("sse_http", "Token refreshed", map[string]any{
+		"old_token": currentToken[:8] + "...",
+		"new_token": newToken[:8] + "...",
+	})
+}
+
+// getTokenTTL returns the configured token TTL duration, defaulting to 24 hours if not set.
+func (c *SSEHTTPChannel) getTokenTTL() time.Duration {
+	if c.config.TokenTTLMinutes > 0 {
+		return time.Duration(c.config.TokenTTLMinutes) * time.Minute
+	}
+	return 24 * time.Hour // default 24 hours
+}
+
+// tokenCleanupLoop periodically removes expired tokens from the activeTokens map.
+func (c *SSEHTTPChannel) tokenCleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.cleanupExpiredTokens()
+		}
+	}
+}
+
+// cleanupExpiredTokens removes all expired tokens from the activeTokens map.
+func (c *SSEHTTPChannel) cleanupExpiredTokens() {
+	now := time.Now()
+	var expiredCount int
+
+	c.activeTokens.Range(func(key, value any) bool {
+		if info, ok := value.(*tokenInfo); ok {
+			if now.After(info.expiresAt) {
+				c.activeTokens.Delete(key)
+				expiredCount++
+			}
+		}
+		return true
+	})
+
+	if expiredCount > 0 {
+		logger.DebugCF("sse_http", "Cleaned up expired tokens", map[string]any{
+			"count": expiredCount,
+		})
+	}
+}
+
+// notifyTokenExpiringSoon sends a notification to connected clients when their token is about to expire.
+func (c *SSEHTTPChannel) notifyTokenExpiringSoon(token string, expiresAt time.Time) {
+	// Notify all connections (they should use this token)
+	c.connections.Range(func(key, value any) bool {
+		sc, ok := value.(*sseConn)
+		if !ok {
+			return true
+		}
+		
+		_ = sc.writeEvent("token_expiring", map[string]any{
+			"expires_at": expiresAt.Unix(),
+			"expires_in": int(time.Until(expiresAt).Seconds()),
+			"message":    "Your token is about to expire. Please refresh your token.",
+		})
+		
+		return true
+	})
 }

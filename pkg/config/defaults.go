@@ -188,6 +188,7 @@ func DefaultConfig() *Config {
 				Port:            18795,
 				Password:        "",
 				Token:           "",
+				TokenTTLMinutes: 1440, // 24 hours
 				AllowTokenQuery: true,
 				AllowOrigins:    []string{"*"},
 				MaxConnections:  100,

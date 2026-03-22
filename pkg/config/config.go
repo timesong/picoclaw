@@ -585,6 +585,7 @@ type SSEHTTPConfig struct {
 	Port               int                 `json:"port"                        env:"PICOCLAW_CHANNELS_SSE_HTTP_PORT"`
 	Password           string              `json:"password"                    env:"PICOCLAW_CHANNELS_SSE_HTTP_PASSWORD"`
 	Token              string              `json:"token"                       env:"PICOCLAW_CHANNELS_SSE_HTTP_TOKEN"`
+	TokenTTLMinutes    int                 `json:"token_ttl_minutes,omitempty" env:"PICOCLAW_CHANNELS_SSE_HTTP_TOKEN_TTL_MINUTES"`
 	AllowTokenQuery    bool                `json:"allow_token_query,omitempty"`
 	AllowOrigins       []string            `json:"allow_origins,omitempty"`
 	MaxConnections     int                 `json:"max_connections,omitempty"`
