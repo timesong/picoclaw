@@ -37,13 +37,13 @@ func testCfg(agents []config.AgentConfig) *config.Config {
 func testCfgWithWorkspace(agents []config.AgentConfig, workspace string) *config.Config {
 	if workspace == "" {
 		// Use a non-existent path that won't accidentally create files
-		workspace = filepath.Join(os.TempDir(), "picoclaw-test-no-create")
+		workspace = filepath.Join(os.TempDir(), "picoclaw-test-registry")
 	}
 	return &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:         workspace,
-				Model:             "gpt-4",
+				ModelName:         "gpt-4",
 				MaxTokens:         8192,
 				MaxToolIterations: 10,
 			},

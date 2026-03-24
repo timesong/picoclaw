@@ -15,7 +15,7 @@ PicoClaw 支持多种聊天平台，使您的 Agent 能够连接到任何地方�
 | **Telegram**         | ⭐ 简单     | 推荐，支持语音转文字，长轮询无需公网      | [查看文档](../channels/telegram/README.zh.md)                                                                 |
 | **Discord**          | ⭐ 简单     | Socket Mode，支持群组/私信，Bot 生态成熟  | [查看文档](../channels/discord/README.zh.md)                                                                  |
 | **WhatsApp**         | ⭐ 简单     | 原生 (QR 扫码) 或 Bridge URL              | [查看文档](#whatsapp)                                                                 |
-| **Weixin**           | ⭐ 简单     | 原生扫码登录 (腾讯 iLink API)              | [查看文档](../channels/weixin/README.zh.md)                                                                     |
+| **微信 (Weixin)**    | ⭐ 简单     | 原生扫码（腾讯 iLink API）                | [查看文档](#weixin)                                                                   |
 | **Slack**            | ⭐ 简单     | **Socket Mode** (无需公网 IP)，企业级支持 | [查看文档](../channels/slack/README.zh.md)                                                                    |
 | **Matrix**           | ⭐⭐ 中等   | 联邦协议，支持自建 homeserver 与公开服务器 | [查看文档](../channels/matrix/README.zh.md)                                                                  |
 | **QQ**               | ⭐⭐ 中等   | 官方机器人 API，适合国内社群              | [查看文档](../channels/qq/README.zh.md)                                                                       |
@@ -23,13 +23,14 @@ PicoClaw 支持多种聊天平台，使您的 Agent 能够连接到任何地方�
 | **LINE**             | ⭐⭐⭐ 较难 | 需要 HTTPS Webhook                        | [查看文档](../channels/line/README.zh.md)                                                                     |
 | **企业微信 (WeCom)** | ⭐⭐⭐ 较难 | 支持群机器人(Webhook)、自建应用(API)和智能机器人(AI Bot) | [Bot 文档](../channels/wecom/wecom_bot/README.zh.md) / [App 文档](../channels/wecom/wecom_app/README.zh.md) / [AI Bot 文档](../channels/wecom/wecom_aibot/README.zh.md) |
 | **飞书 (Feishu)**    | ⭐⭐⭐ 较难 | 企业级协作，功能丰富                      | [查看文档](../channels/feishu/README.zh.md)                                                                   |
-| **IRC**              | ⭐⭐ 中等   | 服务器 + TLS 配置                         | -                                                                                                               |
+| **IRC**              | ⭐⭐ 中等   | 服务器 + TLS 配置                         | [查看文档](#irc) |
 | **OneBot**           | ⭐⭐ 中等   | 兼容 NapCat/Go-CQHTTP，社区生态丰富       | [查看文档](../channels/onebot/README.zh.md)                                                                   |
 | **MaixCam**          | ⭐ 简单     | 专为 AI 摄像头设计的硬件集成通道          | [查看文档](../channels/maixcam/README.zh.md)                                                                  |
 | **Pico**             | ⭐ 简单     | PicoClaw 原生协议通道                     |                                                                                                               |
 
 ---
 
+<a id="telegram"></a>
 <details>
 <summary><b>Telegram</b>（推荐）</summary>
 
@@ -63,13 +64,21 @@ picoclaw gateway
 
 **4. Telegram 命令菜单（启动时自动注册）**
 
-PicoClaw 使用统一的命令定义来源。启动时会自动将 Telegram 支持的命令（例如 `/start`、`/help`、`/show`、`/list`）注册到 Bot 命令菜单，确保菜单展示与实际行为一致。
+PicoClaw 使用统一的命令定义来源。启动时会自动将 Telegram 支持的命令（例如 `/start`、`/help`、`/show`、`/list`、`/use`）注册到 Bot 命令菜单，确保菜单展示与实际行为一致。
 Telegram 侧保留的是命令菜单注册能力；通用命令的实际执行统一走 Agent Loop 中的 commands executor。
 
 如果注册因网络或 API 短暂异常失败，不会阻塞 channel 启动；系统会在后台自动重试。
 
+你也可以直接在 Telegram 中管理已安装技能：
+
+- `/list skills`
+- `/use <skill> <message>`
+- `/use <skill>`，然后在下一条消息里发送真正的请求
+- `/use clear`
+
 </details>
 
+<a id="discord"></a>
 <details>
 <summary><b>Discord</b></summary>
 
@@ -144,6 +153,7 @@ picoclaw gateway
 
 </details>
 
+<a id="whatsapp"></a>
 <details>
 <summary><b>WhatsApp</b>（原生 whatsmeow）</summary>
 
@@ -171,27 +181,30 @@ PicoClaw 支持两种 WhatsApp 连接方式：
 
 </details>
 
+<a id="weixin"></a>
 <details>
-<summary><b>Weixin</b> (微信个人号)</summary>
+<summary><b>微信 (Weixin)</b></summary>
 
-PicoClaw 支持使用腾讯官方 iLink API 连接您的个人微信账号。
+PicoClaw 通过腾讯 iLink 官方 API 支持连接微信个人号。
 
 **1. 登录**
+
 运行交互式扫码登录流程：
 ```bash
-picoclaw onboard weixin
+picoclaw auth weixin
 ```
-在终端扫描打印出的二维码。登录成功后，Token 将自动保存到您的配置文件中。
+用微信手机端扫描打印出的二维码。登录成功后，token 会自动保存到配置文件。
 
 **2. 配置**
-（可选）更新 `allow_from` 填写微信 User ID，以限制哪些用户可以给机器人发消息：
+
+（可选）在 `allow_from` 中填入你的微信用户 ID，限制可以与机器人对话的用户：
 ```json
 {
   "channels": {
     "weixin": {
       "enabled": true,
-      "token": "你的_TOKEN",
-      "allow_from": ["你的_USER_ID"]
+      "token": "YOUR_TOKEN",
+      "allow_from": ["YOUR_USER_ID"]
     }
   }
 }
@@ -204,6 +217,7 @@ picoclaw gateway
 
 </details>
 
+<a id="matrix"></a>
 <details>
 <summary><b>Matrix</b></summary>
 
@@ -238,6 +252,7 @@ picoclaw gateway
 
 </details>
 
+<a id="qq"></a>
 <details>
 <summary><b>QQ</b></summary>
 
@@ -279,6 +294,7 @@ QQ 开放平台提供了一键创建 OpenClaw 兼容机器人的页面：
 
 </details>
 
+<a id="slack"></a>
 <details>
 <summary><b>Slack</b></summary>
 
@@ -312,6 +328,7 @@ picoclaw gateway
 
 </details>
 
+<a id="irc"></a>
 <details>
 <summary><b>IRC</b></summary>
 
@@ -345,6 +362,7 @@ Bot 将连接到 IRC 服务器并加入指定的频道。
 
 </details>
 
+<a id="dingtalk"></a>
 <details>
 <summary><b>钉钉 (DingTalk)</b></summary>
 
@@ -379,6 +397,7 @@ picoclaw gateway
 
 </details>
 
+<a id="line"></a>
 <details>
 <summary><b>LINE</b></summary>
 
@@ -427,6 +446,7 @@ picoclaw gateway
 
 </details>
 
+<a id="feishu"></a>
 <details>
 <summary><b>飞书 (Feishu)</b></summary>
 
@@ -468,6 +488,7 @@ picoclaw gateway
 
 </details>
 
+<a id="wecom"></a>
 <details>
 <summary><b>企业微信 (WeCom)</b></summary>
 
@@ -582,6 +603,7 @@ picoclaw gateway
 
 </details>
 
+<a id="onebot"></a>
 <details>
 <summary><b>OneBot（通过 OneBot 协议连接 QQ）</b></summary>
 
@@ -620,6 +642,7 @@ picoclaw gateway
 
 </details>
 
+<a id="maixcam"></a>
 <details>
 <summary><b>MaixCam</b></summary>
 
