@@ -405,6 +405,10 @@ func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
 		m.initChannel("sse_http", "SSE+HTTP")
 	}
 
+	if m.config.Channels.MQTT.Enabled && m.config.Channels.MQTT.Broker != "" {
+		m.initChannel("mqtt", "mqtt")
+	}
+
 	logger.InfoCF("channels", "Channel initialization completed", map[string]any{
 		"enabled_channels": len(m.channels),
 	})

@@ -38,10 +38,16 @@ func ParseCanonicalID(canonical string) (platform, id string, ok bool) {
 //   - "@alice"              → matches sender.Username
 //   - "123456|alice"        → matches PlatformID or Username
 //   - "telegram:123456"     → exact match on sender.CanonicalID
+//   - "*"                   → matches all senders
 func MatchAllowed(sender bus.SenderInfo, allowed string) bool {
 	allowed = strings.TrimSpace(allowed)
 	if allowed == "" {
 		return false
+	}
+
+	// Wildcard match: "*" allows all senders
+	if allowed == "*" {
+		return true
 	}
 
 	// Try canonical match first: "platform:id" format

@@ -357,6 +357,7 @@ type ChannelsConfig struct {
 	PicoClient PicoClientConfig `json:"pico_client"`
 	IRC        IRCConfig        `json:"irc"`
 	SSEHTTP    SSEHTTPConfig    `json:"sse_http"`
+	MQTT       MQTTConfig       `json:"mqtt"`
 }
 
 // GroupTriggerConfig controls when the bot responds in group chats.
@@ -622,6 +623,31 @@ type SSEHTTPConfig struct {
 	ReasoningChannelID string              `json:"reasoning_channel_id,omitempty"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"                  env:"PICOCLAW_CHANNELS_SSE_HTTP_ALLOW_FROM"`
 	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
+}
+
+type MQTTConfig struct {
+	Enabled            bool                `json:"enabled"                      env:"PICOCLAW_CHANNELS_MQTT_ENABLED"`
+	Broker             string              `json:"broker"                       env:"PICOCLAW_CHANNELS_MQTT_BROKER"`
+	ClientID           string              `json:"client_id"                    env:"PICOCLAW_CHANNELS_MQTT_CLIENT_ID"`
+	Username           string              `json:"username"                     env:"PICOCLAW_CHANNELS_MQTT_USERNAME"`
+	Password           string              `json:"password"                     env:"PICOCLAW_CHANNELS_MQTT_PASSWORD"`
+	Topics             FlexibleStringSlice `json:"topics"                       env:"PICOCLAW_CHANNELS_MQTT_TOPICS"`
+	ResponseTopic      string              `json:"response_topic"               env:"PICOCLAW_CHANNELS_MQTT_RESPONSE_TOPIC"`
+	Qos                int                 `json:"qos"                          env:"PICOCLAW_CHANNELS_MQTT_QOS"`
+	TLS                bool                `json:"tls"                          env:"PICOCLAW_CHANNELS_MQTT_TLS"`
+	CACert             string              `json:"ca_cert"                      env:"PICOCLAW_CHANNELS_MQTT_CA_CERT"`
+	Cert               string              `json:"cert"                         env:"PICOCLAW_CHANNELS_MQTT_CERT"`
+	Key                string              `json:"key"                          env:"PICOCLAW_CHANNELS_MQTT_KEY"`
+	KeepAlive          int                 `json:"keep_alive"                   env:"PICOCLAW_CHANNELS_MQTT_KEEP_ALIVE"`
+	CleanSession       *bool               `json:"clean_session"                env:"PICOCLAW_CHANNELS_MQTT_CLEAN_SESSION"`
+	AutoReconnect      bool                `json:"auto_reconnect"               env:"PICOCLAW_CHANNELS_MQTT_AUTO_RECONNECT"`
+	ReconnectInterval  int                 `json:"reconnect_interval"           env:"PICOCLAW_CHANNELS_MQTT_RECONNECT_INTERVAL"`
+	WillTopic          string              `json:"will_topic"                   env:"PICOCLAW_CHANNELS_MQTT_WILL_TOPIC"`
+	WillMessage        string              `json:"will_message"                 env:"PICOCLAW_CHANNELS_MQTT_WILL_MESSAGE"`
+	WillQos            int                 `json:"will_qos"                     env:"PICOCLAW_CHANNELS_MQTT_WILL_QOS"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"                   env:"PICOCLAW_CHANNELS_MQTT_ALLOW_FROM"`
+	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
+	ReasoningChannelID string              `json:"reasoning_channel_id"         env:"PICOCLAW_CHANNELS_MQTT_REASONING_CHANNEL_ID"`
 }
 
 type HeartbeatConfig struct {
